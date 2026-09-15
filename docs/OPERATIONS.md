@@ -257,3 +257,69 @@ Every log entry uses this schema:
 ```
 
 `correlationId` propagates through all worker stages for a given job, enabling end-to-end trace reconstruction from a single article fetch through to FeatureVector storage.
+
+---
+
+## Phase 3A Changes (2026-09-15)
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3001` | HTTP server port. **Set to 3001 in local dev** — AlphaForge occupies port 3000. |
+| `ML_SERVICE_URL` | `http://localhost:8100` | ml-service base URL for regime prediction |
+| `FRESHNESS_FRESH_THRESHOLD_SECONDS` | `300` | Seconds until FRESH→STALE transition |
+| `FRESHNESS_STALE_THRESHOLD_SECONDS` | `3600` | Seconds until STALE→EXPIRED transition |
+
+### Corrected Source Feed URLs
+
+The following env vars must point to RSS feed endpoints, **not the website homepages**:
+
+| Variable | Correct Value |
+|---|---|
+| `NEWS_SOURCE_MONEYCONTROL_BASE_URL` | `https://www.moneycontrol.com/rss/MCtopnews.xml` |
+| `NEWS_SOURCE_ECONOMICTIMES_BASE_URL` | `https://economictimes.indiatimes.com/rssfeedsdefault.cms` |
+| `NEWS_SOURCE_COINDESK_BASE_URL` | `https://www.coindesk.com/arc/outboundfeeds/rss/` |
+
+Setting these to the homepage URL causes `maxContentLength exceeded` errors in health checks and 0-article fetches.
+
+### Updated SSRF Allowlist
+
+The SSRF guard now supports subdomain matching (www.X.com matches X.com). The allowlist should include both bare domain and www:
+
+```
+ALLOWED_SOURCE_DOMAINS=news.google.com,feeds.reuters.com,moneycontrol.com,www.moneycontrol.com,economictimes.indiatimes.com,www.economictimes.indiatimes.com,bloomberg.com,www.bloomberg.com,ft.com,www.ft.com,coindesk.com,www.coindesk.com,localhost
+```
+
+### Starting the API Server (local dev)
+
+```bash
+# Load .env.local and start on port 3001
+set -a && source .env.local && set +a && PORT=3001 npx tsx src/server.ts
+```
+
+### Starting the Scheduler (local dev)
+
+```bash
+set -a && source .env.local && set +a && \
+  NEWS_SOURCE_COINDESK_ENABLED=true npx tsx src/scripts/run-scheduler.ts
+```
+
+### Seeding news_sources (required before first run)
+
+```bash
+set -a && source .env.local && set +a && \
+  NEWS_SOURCE_COINDESK_ENABLED=true npx tsx src/scripts/seed-sources.ts
+```
+
+### Embedding Configuration
+
+The `EmbeddingEngine` is now non-blocking. When `EMBEDDING_API_KEY` is absent:
+- `generateAndStore()` returns `{ embedding_available: false, embedding_status: "SKIPPED" }`
+- Core pipeline stages (event, sentiment, impact, features) are unaffected
+- Jobs do not pile up in `news.embeddings` queue
+
+To enable embeddings, add a valid OpenAI API key:
+```
+EMBEDDING_API_KEY=sk-...
+```

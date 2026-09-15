@@ -5,7 +5,7 @@
 | Property | Value |
 |---|---|
 | Version | v1 |
-| Base URL | `http://localhost:3000/api/v1` (configurable via `PORT` env var) |
+| Base URL | `http://localhost:3001/api/v1` (local dev; configurable via `PORT` env var — defaults to 3001 locally because AlphaForge owns port 3000) |
 | Transport | HTTP/1.1 and HTTP/2 |
 | Data Format | `application/json` for all request and response bodies |
 | Authentication | Bearer token (see [Authentication](#authentication)) |
@@ -27,7 +27,7 @@ Authorization: Bearer <your-api-key>
 
 ```bash
 curl -H "Authorization: Bearer sp_abc123def456" \
-  http://localhost:3000/api/v1/news/latest
+  http://localhost:3001/api/v1/news/latest
 ```
 
 **401 Response — missing or invalid token:**
@@ -1577,8 +1577,8 @@ if (res.status === 400) {
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/news/latest?limit=5&min_importance=0.7" \
-  | jq '.data.articles[] | {headline, importance_score, event_type, published_at}'
+  "http://localhost:3001/api/v1/news/latest?limit=5&min_importance=0.7" \
+  | python3 -m json.tool
 ```
 
 ---
@@ -1588,25 +1588,19 @@ curl -s \
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/alphaforge/news-context/NIFTY50" \
-  | jq '{
-      news_impact_score: .data.news_impact_score,
-      impact_direction: .data.impact_direction,
-      impact_confidence: .data.impact_confidence,
-      regime: .data.market_regime,
-      top_event: .data.latest_event.headline
-    }'
+  "http://localhost:3001/api/v1/alphaforge/news-context/NIFTY50" \
+  | python3 -m json.tool
 ```
 
 ---
 
-### 3. High-Impact Events (last 4 hours, any asset)
+### 3. High-Impact Events (last 4 hours)
 
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/alphaforge/high-impact-events?hours=4&min_importance=0.75&limit=10" \
-  | jq '.data.events[] | {event_type, headline, importance_score, affected_assets}'
+  "http://localhost:3001/api/v1/alphaforge/high-impact-events?hours=4&min_importance=0.7&limit=10" \
+  | python3 -m json.tool
 ```
 
 ---
@@ -1616,24 +1610,19 @@ curl -s \
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/news/assets/RELIANCE?hours=12&min_importance=0.4" \
-  | jq '{
-      net_direction: .data.net_impact_direction,
-      confidence: .data.impact_confidence,
-      article_count: (.data.articles | length),
-      aggregate_sentiment: .data.aggregate_sentiment
-    }'
+  "http://localhost:3001/api/v1/news/assets/RELIANCE?hours=12&min_importance=0.4" \
+  | python3 -m json.tool
 ```
 
 ---
 
-### 5. Training Samples (feature_version 1.2.0, last 30 days)
+### 5. Training Samples (feature_version 1.0.0)
 
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/ml/training/samples?feature_version=1.2.0&start_date=2023-12-16T00:00:00Z&end_date=2024-01-15T23:59:59Z&limit=100" \
-  | jq '{total: .meta.total, has_more: .meta.has_more, sample_count: (.data.samples | length)}'
+  "http://localhost:3001/api/v1/ml/training/samples?feature_version=1.0.0&limit=100" \
+  | python3 -m json.tool
 ```
 
 ---
@@ -1643,14 +1632,89 @@ curl -s \
 ```bash
 curl -s \
   -H "Authorization: Bearer $SENTINEL_API_KEY" \
-  "http://localhost:3000/api/v1/admin/data-quality" \
-  | jq '{
-      all_ok: .data.all_thresholds_met,
-      entity_rate: .data.metrics.entity_resolution_rate,
-      sentiment_rate: .data.metrics.sentiment_coverage_rate,
-      reaction_rate: .data.metrics.high_importance_reaction_rate
-    }'
+  "http://localhost:3001/api/v1/admin/data-quality" \
+  | python3 -m json.tool
 ```
+
+---
+
+## Phase 3A Admin Endpoints
+
+### POST /api/v1/admin/test/pipeline
+
+Runs a controlled article through all 12 pipeline stages inline (no BullMQ queue dispatch). Returns per-stage results and a complete lineage record. Used for smoke testing and debugging.
+
+**Request body (all optional):**
+
+```json
+{
+  "source_id": "reuters",
+  "title": "RBI holds repo rate at 6.5%",
+  "content": "Full article text here..."
+}
+```
+
+If `title`/`content` are omitted, a default canned RBI article is used.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "article_id": "uuid",
+    "stages_completed": 10,
+    "stages_total": 12,
+    "errors": [],
+    "stage_results": {
+      "stage_2_normalization": { "status": "OK", "content_depth": "HEADLINE_ONLY", "content_quality_score": 0.25 },
+      "stage_4_entity": { "status": "OK", "entity_mentions": 14, "asset_links": 6 },
+      "stage_5_event": { "status": "OK", "events_detected": 1, "event_types": ["MONETARY_POLICY"] },
+      "stage_7_importance": { "status": "OK", "importance_score": 0.624 },
+      "stage_8_market_impact": { "status": "OK", "impacts_created": 2, "affected_assets": ["NIFTY50", "BANKNIFTY"] },
+      "stage_10_features": { "status": "OK", "features_created": 1 },
+      "stage_11_training_sample": { "status": "SKIPPED", "reason": "Training samples require labeled future returns" },
+      "stage_12_embedding": { "status": "SKIPPED", "reason": "EMBEDDING_API_KEY not configured" }
+    },
+    "lineage": { "..." : "full lineage chain" }
+  },
+  "meta": { "duration_ms": 172 }
+}
+```
+
+**curl example:**
+
+```bash
+KEY="dev-local-api-key-change-before-sharing"
+curl -s -X POST http://localhost:3001/api/v1/admin/test/pipeline \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source_id":"moneycontrol"}' | python3 -m json.tool
+```
+
+---
+
+### GET /api/v1/admin/lineage/:articleId
+
+Returns the complete pipeline lineage for any processed article. Useful for verifying end-to-end traceability.
+
+**Path parameter:** `articleId` — UUID from `news_articles`
+
+**Response includes:**
+- Article metadata (source, content_depth, content_quality_score, cluster)
+- Entity mentions count
+- Asset and sector links
+- Sentiment records
+- Events with importance, market impacts, market reactions, feature vectors, and training samples
+
+```bash
+KEY="dev-local-api-key-change-before-sharing"
+ARTICLE_ID="your-article-uuid-here"
+curl -s -H "Authorization: Bearer $KEY" \
+  http://localhost:3001/api/v1/admin/lineage/$ARTICLE_ID | python3 -m json.tool
+```
+
+Returns `404` if article not found. Includes `is_complete` flag and `missing_stages` list.
 
 ---
 

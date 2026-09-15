@@ -231,3 +231,64 @@ stateDiagram-v2
 ```
 
 Each source has its own isolated CircuitBreaker instance. Configuration is set via `CB_FAILURE_THRESHOLD` and `CB_RECOVERY_TIMEOUT_MS`.
+
+---
+
+## Phase 3A Architecture Changes
+
+### New Components
+
+| Component | File | Purpose |
+|---|---|---|
+| `InstrumentIndex` | `src/engines/entity/InstrumentIndex.ts` | Singleton O(1) lookup index over 34K data-service instruments. Built-in alias map (~120 entries) + periodic sync from `GET /v1/instruments`. Used by EntityResolutionEngine before falling back to DataServiceClient HTTP calls. |
+| `MlServiceClient` | `src/integrations/ml-service/MlServiceClient.ts` | Typed HTTP client for `ml-service POST /predict/regime`. Replaces the broken `DataServiceClient.getRegimeSignals()` (which always returned `[]`). |
+| `DataFreshness` | `src/engines/feature-engineering/DataFreshness.ts` | Stateless utility for computing FRESH/STALE/EXPIRED/UNAVAILABLE freshness states. Attached to every feature vector via `FreshnessMetadata`. |
+| `src/server.ts` | `src/server.ts` | Entry point that calls `buildApp()` and starts the Fastify server. Handles graceful shutdown on SIGTERM/SIGINT. |
+| `src/scripts/run-scheduler.ts` | `src/scripts/run-scheduler.ts` | Standalone scheduler process. Instantiates adapters + Scheduler + rawQueue and starts ingestion. |
+| `src/scripts/seed-sources.ts` | `src/scripts/seed-sources.ts` | Idempotent seeder for `news_sources` table. |
+
+### Modified Components
+
+| Component | Change |
+|---|---|
+| `SsrfGuard` | Added subdomain matching — `www.X.com` now matches parent domain `X.com` in the allowlist. |
+| `EmbeddingEngine` | Returns `EmbeddingOutcome` with `embedding_available` and `embedding_status` (COMPLETED/PENDING/SKIPPED/FAILED). Non-blocking — short-circuits immediately when `EMBEDDING_API_KEY` is absent. |
+| `NormalizationEngine` | Added `content_depth` (FULL_ARTICLE/SUMMARY/HEADLINE_ONLY) and `content_quality_score` classification. Per-source overrides: Reuters always → HEADLINE_ONLY. |
+| `ImportanceEngine` | `fetchSourceReliability()` upgraded to `computeSourceConfidence()` — multi-factor formula: `source_reliability × 0.6 + content_quality_score × 0.4`. |
+| `MarketRegimeEngine` | `updateMarket()` now calls `MlServiceClient.predictRegime()` instead of the broken `getRegimeSignals()`. Falls back gracefully when ml-service is unavailable. |
+| `EntityResolutionEngine` | 2-layer resolution: InstrumentIndex (O(1), no network) first, then DataServiceClient HTTP lookup for misses. |
+| All BullMQ workers | Added explicit Date coercion for `publishedAt` fields (BullMQ JSON-serializes Date→string). Entity/event/sentiment workers now fetch full article from DB using `articleId` (upstream queues publish only `articleId`, not the full article). |
+| Admin API | Added `POST /admin/test/pipeline` (inline smoke test) and `GET /admin/lineage/:articleId` (full lineage trace). |
+
+### Content Depth Classification
+
+```
+Source                      Content Depth     Quality Score   Source Confidence (example)
+Reuters (Google News RSS)   HEADLINE_ONLY     0.25            0.9 × 0.6 + 0.25 × 0.4 = 0.64
+Moneycontrol RSS            SUMMARY           0.50            0.85 × 0.6 + 0.5 × 0.4 = 0.71
+Economic Times RSS          SUMMARY           0.50            0.85 × 0.6 + 0.5 × 0.4 = 0.71
+CoinDesk RSS                SUMMARY           0.50            0.80 × 0.6 + 0.5 × 0.4 = 0.68
+Bloomberg API               FULL_ARTICLE      0.90            0.95 × 0.6 + 0.9 × 0.4 = 0.93
+Financial Times API         FULL_ARTICLE      0.90            0.95 × 0.6 + 0.9 × 0.4 = 0.93
+```
+
+### Regime Integration Architecture
+
+```
+BEFORE (broken):
+MarketRegimeEngine.updateMarket()
+  → DataServiceClient.getRegimeSignals()  [always returned []]
+  → classifyRegime([])                     [always returned SIDEWAYS/0.5]
+
+AFTER (Phase 3A):
+MarketRegimeEngine.updateMarket()
+  → DataServiceClient.getMarketContextSnapshot("NIFTY")   [live quote]
+  → DataServiceClient.getMarketContextSnapshot("BANKNIFTY")
+  → MlServiceClient.predictRegime(request)                [real ML model]
+  → normaliseRegime(prediction.regime)
+  → persist + cache
+  OR (if unavailable)
+  → log WARN, retain cached regime, set regime_data_available=false
+```
+
+*Updated: Phase 3A Runtime Certification — 2026-09-15*
