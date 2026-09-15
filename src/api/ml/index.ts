@@ -43,6 +43,7 @@ const ML_PAGE_DEFAULT = 100;
 // Route registration
 // ---------------------------------------------------------------------------
 
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function registerMlRoutes(app: FastifyInstance): Promise<void> {
   // ─────────────────────────────────────────────────────────────────────────
   // GET /api/v1/ml/features/market

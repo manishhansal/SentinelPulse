@@ -26,7 +26,7 @@ import { Worker, Queue, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
-import { EmbeddingEngine } from '../engines/embedding/EmbeddingEngine.js';
+import { EmbeddingEngine, type EmbeddingEntityType } from '../engines/embedding/EmbeddingEngine.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
 
 const logger = pino({ name: 'embed-worker' });
@@ -45,7 +45,7 @@ const worker = new Worker(
   QUEUE_NAMES.EMBEDDINGS,
   async (job: Job<{ text: string; entityType: string; entityId: string; modelVersion?: string }>) => {
     try {
-      await engine.generateAndStore(job.data.text, job.data.entityType as any, job.data.entityId);
+      await engine.generateAndStore(job.data.text, job.data.entityType as EmbeddingEntityType, job.data.entityId);
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');

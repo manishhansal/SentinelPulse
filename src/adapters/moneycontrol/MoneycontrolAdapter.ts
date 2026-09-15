@@ -52,9 +52,9 @@ const logger = pino({ name: 'moneycontrol-adapter' });
 // Constants
 // ---------------------------------------------------------------------------
 
-const MC_SOURCE_ID = 'moneycontrol' as const;
-const MC_SOURCE_NAME = 'Moneycontrol' as const;
-const ADAPTER_VERSION = '1.0.0' as const;
+const MC_SOURCE_ID = 'moneycontrol';
+const MC_SOURCE_NAME = 'Moneycontrol';
+const ADAPTER_VERSION = '1.0.0';
 
 /** Default RSS feed URL. Overridable via NEWS_SOURCE_MONEYCONTROL_BASE_URL. */
 const DEFAULT_FEED_URL = 'https://www.moneycontrol.com/rss/MCtopnews.xml';
@@ -89,7 +89,7 @@ export class MoneycontrolAdapter extends AbstractNewsSourceAdapter {
   readonly sourceId = MC_SOURCE_ID;
   readonly sourceName = MC_SOURCE_NAME;
   readonly adapterVersion = ADAPTER_VERSION;
-  readonly tier = 1 as const;
+  readonly tier = 1;
 
   // ------------------------------------------------------------------
   // Configuration
@@ -183,7 +183,7 @@ export class MoneycontrolAdapter extends AbstractNewsSourceAdapter {
     try {
       const res = await this.http.get<string>(this.feedUrl, {
         responseType: 'text',
-        maxContentLength: 4096,
+        maxContentLength: 512_000,
       });
       const latencyMs = Date.now() - start;
       const healthy = res.status >= 200 && res.status < 300;
@@ -379,6 +379,8 @@ export class MoneycontrolAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'SUMMARY' as const,
+      contentQualityScore: 0.5,
     };
   }
 

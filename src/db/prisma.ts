@@ -37,7 +37,7 @@ if (process.env['NODE_ENV'] !== 'production') {
 // ---------------------------------------------------------------------------
 
 /** Maximum rows returned by any list query (Req 28.6). */
-export const MAX_QUERY_RESULTS = 1000 as const;
+export const MAX_QUERY_RESULTS = 1000;
 
 // ---------------------------------------------------------------------------
 // Type aliases — Prisma-generated payload types used throughout the codebase

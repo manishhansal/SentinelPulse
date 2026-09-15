@@ -1,46 +1,45 @@
 # =============================================================================
-# SentinelPulse — Docker Compose (task 39.2)
+# SentinelPulse — Docker Compose
 #
-# Services:
-#   Infrastructure:
-#     postgres    — pgvector-enabled PostgreSQL 16
-#     redis       — Redis 7 (BullMQ + cache)
-#     scrapling   — Python Scrapling service for JS-rendered pages
+# Infrastructure note:
+#   This compose file does NOT include postgres or redis services.
+#   SentinelPulse connects to the existing AlphaForge stack:
+#     PostgreSQL : data-service-postgres  → localhost:5444
+#     Redis      : alpha-forge-redis      → localhost:6379
+#   Both are already running as part of the AlphaForge docker stack.
+#   DATABASE_URL and REDIS_URL in .env.local point to these containers.
 #
-#   Application:
-#     api         — Fastify REST API (src/app.ts)
-#     scheduler   — Ingestion scheduler / coordinator
+# Services managed here:
+#   scrapling   — Python content extraction sidecar (port 8001)
+#   api         — Fastify REST API (port 3001)
+#   scheduler   — Ingestion scheduler
+#   worker-*    — 8 BullMQ pipeline workers
+#   cron-*      — 3 periodic background tasks
 #
-#   Workers (8 BullMQ workers, one per pipeline stage):
-#     worker-normalize
-#     worker-dedup
-#     worker-entity
-#     worker-event
-#     worker-sentiment
-#     worker-impact
-#     worker-feature
-#     worker-embed
+# Usage:
+#   docker compose -f docker/docker-compose.yml --env-file .env.local up -d
 #
-#   Cron jobs (periodic background tasks):
-#     cron-velocity   — News velocity / momentum recalculation
-#     cron-breadth    — Market breadth recalculation
-#     cron-regime     — Market regime classification
+# Phase 3A verified — 2026-09-15
 # =============================================================================
 
-version: '3.9'
+# Sets the Docker Compose project name.
+# Containers will be named: sentinel-pulse-api-1, sentinel-pulse-scrapling-1, etc.
+# Without this, Docker defaults to the directory name ("docker") as the prefix.
+name: sentinel-pulse
 
 # ---------------------------------------------------------------------------
-# Shared environment block (anchored for DRY reuse across services)
+# Shared environment variables
 # ---------------------------------------------------------------------------
 x-common-env: &common-env
   NODE_ENV: production
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  DATABASE_URL: ${DATABASE_URL:-postgresql://sentinel:sentinel_password@postgres:5432/sentinel_pulse}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
   SENTINEL_API_KEY: ${SENTINEL_API_KEY}
   DATA_SERVICE_URL: ${DATA_SERVICE_URL}
   DATA_SERVICE_API_KEY: ${DATA_SERVICE_API_KEY}
-  SCRAPLING_URL: http://scrapling:8001
+  SCRAPLING_URL: ${SCRAPLING_URL:-http://scrapling:8001}
+  ML_SERVICE_URL: ${ML_SERVICE_URL:-http://host.docker.internal:8100}
   FEATURE_VERSION: ${FEATURE_VERSION:-1.0.0}
   PIPELINE_VERSION: ${PIPELINE_VERSION:-1.0.0}
   # Source toggles
@@ -50,18 +49,19 @@ x-common-env: &common-env
   NEWS_SOURCE_BLOOMBERG_ENABLED: ${NEWS_SOURCE_BLOOMBERG_ENABLED:-false}
   NEWS_SOURCE_FINANCIALTIMES_ENABLED: ${NEWS_SOURCE_FINANCIALTIMES_ENABLED:-false}
   NEWS_SOURCE_COINDESK_ENABLED: ${NEWS_SOURCE_COINDESK_ENABLED:-false}
-  # Per-source config
-  NEWS_SOURCE_REUTERS_BASE_URL: ${NEWS_SOURCE_REUTERS_BASE_URL:-https://feeds.reuters.com/reuters}
+  # Per-source RSS feed endpoints (NOT homepage URLs)
+  NEWS_SOURCE_REUTERS_BASE_URL: ${NEWS_SOURCE_REUTERS_BASE_URL:-https://news.google.com/rss/search?q=site:reuters.com+finance+markets&hl=en-IN&gl=IN&ceid=IN:en}
   NEWS_SOURCE_REUTERS_POLL_INTERVAL_MS: ${NEWS_SOURCE_REUTERS_POLL_INTERVAL_MS:-60000}
-  NEWS_SOURCE_MONEYCONTROL_BASE_URL: ${NEWS_SOURCE_MONEYCONTROL_BASE_URL:-https://www.moneycontrol.com}
+  NEWS_SOURCE_MONEYCONTROL_BASE_URL: ${NEWS_SOURCE_MONEYCONTROL_BASE_URL:-https://www.moneycontrol.com/rss/MCtopnews.xml}
   NEWS_SOURCE_MONEYCONTROL_POLL_INTERVAL_MS: ${NEWS_SOURCE_MONEYCONTROL_POLL_INTERVAL_MS:-60000}
-  NEWS_SOURCE_ECONOMICTIMES_BASE_URL: ${NEWS_SOURCE_ECONOMICTIMES_BASE_URL:-https://economictimes.indiatimes.com}
+  NEWS_SOURCE_ECONOMICTIMES_BASE_URL: ${NEWS_SOURCE_ECONOMICTIMES_BASE_URL:-https://economictimes.indiatimes.com/rssfeedsdefault.cms}
   NEWS_SOURCE_ECONOMICTIMES_POLL_INTERVAL_MS: ${NEWS_SOURCE_ECONOMICTIMES_POLL_INTERVAL_MS:-60000}
   NEWS_SOURCE_BLOOMBERG_BASE_URL: ${NEWS_SOURCE_BLOOMBERG_BASE_URL:-https://www.bloomberg.com}
   NEWS_SOURCE_BLOOMBERG_API_KEY: ${NEWS_SOURCE_BLOOMBERG_API_KEY:-}
   NEWS_SOURCE_FINANCIALTIMES_BASE_URL: ${NEWS_SOURCE_FINANCIALTIMES_BASE_URL:-https://www.ft.com}
   NEWS_SOURCE_FINANCIALTIMES_API_KEY: ${NEWS_SOURCE_FINANCIALTIMES_API_KEY:-}
   NEWS_SOURCE_COINDESK_BASE_URL: ${NEWS_SOURCE_COINDESK_BASE_URL:-https://www.coindesk.com/arc/outboundfeeds/rss/}
+  NEWS_SOURCE_COINDESK_POLL_INTERVAL_MS: ${NEWS_SOURCE_COINDESK_POLL_INTERVAL_MS:-300000}
   # Circuit breaker + retry
   CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
   CB_RECOVERY_TIMEOUT_MS: ${CB_RECOVERY_TIMEOUT_MS:-60000}
@@ -77,275 +77,154 @@ x-common-env: &common-env
   WORKER_IMPACT_CONCURRENCY: ${WORKER_IMPACT_CONCURRENCY:-2}
   WORKER_FEATURE_CONCURRENCY: ${WORKER_FEATURE_CONCURRENCY:-4}
   WORKER_EMBED_CONCURRENCY: ${WORKER_EMBED_CONCURRENCY:-2}
-  # Embedding
+  # Embedding (optional — pipeline works without it)
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-large}
   EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
   EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-  # SSRF allowlist
-  ALLOWED_SOURCE_DOMAINS: ${ALLOWED_SOURCE_DOMAINS:-feeds.reuters.com,moneycontrol.com,economictimes.indiatimes.com,bloomberg.com,ft.com,coindesk.com}
+  # SSRF allowlist — www. variants included for subdomain matching
+  ALLOWED_SOURCE_DOMAINS: ${ALLOWED_SOURCE_DOMAINS:-news.google.com,feeds.reuters.com,moneycontrol.com,www.moneycontrol.com,economictimes.indiatimes.com,www.economictimes.indiatimes.com,bloomberg.com,www.bloomberg.com,ft.com,www.ft.com,coindesk.com,www.coindesk.com}
+  # Staleness thresholds (Phase 3A)
+  FRESHNESS_FRESH_THRESHOLD_SECONDS: ${FRESHNESS_FRESH_THRESHOLD_SECONDS:-300}
+  FRESHNESS_STALE_THRESHOLD_SECONDS: ${FRESHNESS_STALE_THRESHOLD_SECONDS:-3600}
   # Backfill
   BACKFILL_MAX_CONCURRENCY: ${BACKFILL_MAX_CONCURRENCY:-2}
   BACKFILL_MAX_LIVE_QUEUE_SHARE: ${BACKFILL_MAX_LIVE_QUEUE_SHARE:-0.20}
 
 # ---------------------------------------------------------------------------
-# Restart policy anchor
+# Application service base — single anchor per service (YAML only allows
+# one << merge key per mapping level).
+# No depends_on here since postgres/redis are external to this compose file.
+# disable_healthcheck: workers don't expose HTTP — healthcheck is only on api.
 # ---------------------------------------------------------------------------
-x-restart-policy: &restart-policy
+x-app-svc: &app-svc
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
   restart: unless-stopped
+  # Allow containers to reach host-network services (data-service-postgres on
+  # localhost:5444, alpha-forge-redis on localhost:6379, ml-service on 8100)
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  # Workers and crons don't expose HTTP — disable the inherited healthcheck
+  healthcheck:
+    disable: true
 
 services:
-  # ── Infrastructure ─────────────────────────────────────────────────────────
-
-  postgres:
-    image: pgvector/pgvector:pg16
-    <<: *restart-policy
-    environment:
-      POSTGRES_DB: sentinel_pulse
-      POSTGRES_USER: sentinel
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel_password}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel_pulse"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  redis:
-    image: redis:7-alpine
-    <<: *restart-policy
-    command: redis-server --save 60 1 --loglevel warning
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # ── Scrapling sidecar ───────────────────────────────────────────────────────
+  # Content extraction service for JS-rendered pages.
+  # Lives inside this compose network so all app containers reach it as
+  # http://scrapling:8001 (via SCRAPLING_URL env var).
 
   scrapling:
     build:
       context: ..
       dockerfile: docker/Dockerfile.scrapling
-    <<: *restart-policy
-    environment:
-      PORT: "8001"
+    restart: unless-stopped
     ports:
       - "8001:8001"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
 
-  # ── Application ────────────────────────────────────────────────────────────
+  # ── API ─────────────────────────────────────────────────────────────────────
 
   api:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-      PORT: "3000"
+      PORT: "3001"
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
-      postgres:
+      scrapling:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+    # Override the base disable to give the API its real HTTP healthcheck
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1))\""]
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1))\""]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
-    command: ["node", "dist/app.js"]
+      start_period: 20s
+    # ENTRYPOINT (docker-entrypoint.sh) runs migrations then starts server.
+    # CMD default is node dist/server.js — no override needed here.
+
+  # ── Scheduler ───────────────────────────────────────────────────────────────
 
   scheduler:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["node", "dist/engines/ingestion/Scheduler.js"]
+    command: ["node", "dist/scripts/run-scheduler.js"]
 
-  # ── Workers ────────────────────────────────────────────────────────────────
+  # ── Workers ─────────────────────────────────────────────────────────────────
 
   worker-normalize:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/normalize.worker.js"]
 
   worker-dedup:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/dedup.worker.js"]
 
   worker-entity:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/entity.worker.js"]
 
   worker-event:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/event.worker.js"]
 
   worker-sentiment:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/sentiment.worker.js"]
 
   worker-impact:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/impact.worker.js"]
 
   worker-feature:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/feature.worker.js"]
 
   worker-embed:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/workers/embed.worker.js"]
 
-  # ── Cron jobs ──────────────────────────────────────────────────────────────
+  # ── Cron jobs ────────────────────────────────────────────────────────────────
 
   cron-velocity:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/engines/velocity/velocity-cron.js"]
 
   cron-breadth:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/engines/breadth/breadth-cron.js"]
 
   cron-regime:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    <<: *restart-policy
+    <<: *app-svc
     environment:
       <<: *common-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["node", "dist/engines/market-regime/regime-cron.js"]
-
-# ---------------------------------------------------------------------------
-# Named volumes
-# ---------------------------------------------------------------------------
-volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local

@@ -66,6 +66,7 @@ export function setAlphaForgeRedisClient(client: unknown): void {
 // Cache helpers
 // ---------------------------------------------------------------------------
 
+// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
 async function getCachedContext(instrument: string): Promise<unknown | null> {
   if (!redisClient) return null;
   try {
@@ -96,6 +97,7 @@ async function setCachedContext(instrument: string, data: unknown): Promise<void
 // Route registration
 // ---------------------------------------------------------------------------
 
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function registerAlphaForgeRoutes(app: FastifyInstance): Promise<void> {
   const analogueEngine = new HistoricalAnalogueEngine();
 
@@ -372,7 +374,7 @@ export async function registerAlphaForgeRoutes(app: FastifyInstance): Promise<vo
         most_relevant_historical_analogue:
           historicalAnalogueSummary !== null &&
           typeof historicalAnalogueSummary === 'object' &&
-          'mostRelevantAnalogue' in (historicalAnalogueSummary as object)
+          'mostRelevantAnalogue' in (historicalAnalogueSummary)
             ? (historicalAnalogueSummary as { mostRelevantAnalogue: unknown })
                 .mostRelevantAnalogue
             : null,

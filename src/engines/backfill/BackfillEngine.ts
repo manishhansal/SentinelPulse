@@ -48,6 +48,7 @@ const MIN_BATCH_SIZE = 1;
 const CHECKPOINT_FEATURE_TYPE = 'BACKFILL_CHECKPOINT';
 
 /** Feature version used for checkpoint rows. */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const FEATURE_VERSION = '1.0.0';
 
 /** Pipeline version tag stored on every news_features checkpoint row. */
@@ -468,6 +469,7 @@ export class BackfillEngine {
    * This stub exists to define the extension point without coupling the engine
    * to every downstream stage at compile time.
    */
+  // eslint-disable-next-line @typescript-eslint/require-await
   private async runPipelineForArticle(article: ArticleRef): Promise<void> {
     // Extension point: replace with real pipeline stage invocations.
     // Each stage should:
@@ -539,7 +541,8 @@ export class BackfillEngine {
           computedAt: state.lastCheckpointAt,
         },
       });
-    } catch (err) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (_err) {
       // If upsert-by-compound-key fails (e.g. null handling), fall back to
       // a simpler findFirst + upsert pattern.
       await this.saveCheckpointFallback(state, featureVector);

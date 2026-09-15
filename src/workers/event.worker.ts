@@ -23,6 +23,7 @@ import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
 import { EventDetectionEngine } from '../engines/event-detection/EventDetectionEngine.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
+import { prisma } from '../db/prisma.js';
 
 const logger = pino({ name: 'event-worker' });
 const CONCURRENCY = parseInt(process.env['WORKER_EVENT_CONCURRENCY'] ?? '1', 10);
@@ -37,14 +38,28 @@ const engine = new EventDetectionEngine(eventsQueue);
 const worker = new Worker(
   QUEUE_NAMES.ENTITIES,
   async (job: Job) => {
+    const { articleId } = job.data as { articleId: string };
     try {
-      await engine.process(job.data);
+      // Fetch full article from DB (entity worker publishes only articleId)
+      const article = await prisma.newsArticle.findUnique({ where: { id: articleId } });
+      if (!article) {
+        logger.warn({ articleId, jobId: job.id }, 'Article not found — skipping event detection');
+        return;
+      }
+      await engine.process({
+        id: article.id,
+        sourceId: article.sourceId,
+        title: article.title,
+        summary: article.summary,
+        content: article.content,
+        publishedAt: article.publishedAt,
+      });
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');
-        return; // complete without downstream publish
+        return;
       }
-      throw err; // BullMQ will retry per queue policy
+      throw err;
     }
   },
   { connection, concurrency: CONCURRENCY },

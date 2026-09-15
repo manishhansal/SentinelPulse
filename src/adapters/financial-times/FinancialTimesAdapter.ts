@@ -106,10 +106,10 @@ export class FinancialTimesAdapter extends AbstractNewsSourceAdapter {
   // ------------------------------------------------------------------
   // NewsSourceAdapter identity
   // ------------------------------------------------------------------
-  readonly sourceId = 'financial-times' as const;
-  readonly sourceName = 'Financial Times' as const;
-  readonly adapterVersion = '1.0.0' as const;
-  readonly tier = 2 as const;
+  readonly sourceId = 'financial-times';
+  readonly sourceName = 'Financial Times';
+  readonly adapterVersion = '1.0.0';
+  readonly tier = 2;
 
   // ------------------------------------------------------------------
   // Configuration read from environment at construction time
@@ -392,6 +392,8 @@ export class FinancialTimesAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'FULL_ARTICLE' as const,
+      contentQualityScore: 0.9,
     };
   }
 

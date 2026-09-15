@@ -21,7 +21,7 @@ import { Worker, Queue, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
-import { DeduplicationEngine } from '../engines/deduplication/DeduplicationEngine.js';
+import { DeduplicationEngine, type ArticleInput } from '../engines/deduplication/DeduplicationEngine.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
 
 const logger = pino({ name: 'dedup-worker' });
@@ -38,7 +38,15 @@ const worker = new Worker(
   QUEUE_NAMES.NORMALIZED,
   async (job: Job) => {
     try {
-      await engine.process(job.data);
+      // BullMQ serialises Date fields to strings — coerce publishedAt back to Date
+      const data = job.data as ArticleInput;
+      const normalised: ArticleInput = {
+        ...data,
+        publishedAt: data.publishedAt instanceof Date
+          ? data.publishedAt
+          : new Date(data.publishedAt as unknown as string),
+      };
+      await engine.process(normalised);
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');

@@ -23,6 +23,7 @@ import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
 import { EntityResolutionEngine } from '../engines/entity/EntityResolutionEngine.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
+import { prisma } from '../db/prisma.js';
 
 const logger = pino({ name: 'entity-worker' });
 const CONCURRENCY = parseInt(process.env['WORKER_ENTITY_CONCURRENCY'] ?? '1', 10);
@@ -37,14 +38,29 @@ const engine = new EntityResolutionEngine(entitiesQueue);
 const worker = new Worker(
   QUEUE_NAMES.DEDUPLICATED,
   async (job: Job) => {
+    const { articleId } = job.data as { articleId: string };
     try {
-      await engine.process(job.data);
+      // Fetch full article from DB (dedup publishes only articleId + dedup result)
+      const article = await prisma.newsArticle.findUnique({ where: { id: articleId } });
+      if (!article) {
+        logger.warn({ articleId, jobId: job.id }, 'Article not found — skipping entity resolution');
+        return;
+      }
+      await engine.process({
+        id: article.id,
+        sourceId: article.sourceId,
+        externalId: article.externalId,
+        title: article.title,
+        summary: article.summary,
+        content: article.content,
+        publishedAt: article.publishedAt,
+      });
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');
-        return; // complete without downstream publish
+        return;
       }
-      throw err; // BullMQ will retry per queue policy
+      throw err;
     }
   },
   { connection, concurrency: CONCURRENCY },

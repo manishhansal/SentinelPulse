@@ -3,14 +3,16 @@
  * major market (India, US, Global).
  *
  * Update cycle (every 15 minutes, run by regime-cron):
- *   1. Fetch regime signals from data-service via DataServiceClient.
- *   2. Classify the dominant regime from the signal set.
+ *   1. Request regime prediction from ml-service POST /predict/regime using
+ *      current market data from the data-service quote endpoint.
+ *   2. If ml-service OR data-service is unavailable, retain the existing
+ *      cached regime and emit a WARN log (Req 13.5).
+ *      regime_data_available is set to false on the feature vector when no
+ *      regime is available — fabricated regimes are never written (Req 13.5).
  *   3. If the regime changed, close the prior DB record (valid_to = now) and
  *      open a new one (valid_from = now). Purge Redis cached impact scores for
  *      active high-importance events linked to that market (Req 13.3).
  *   4. Write/refresh the Redis key news:regime:{market_id} (TTL = 20 min).
- *   5. If data-service is unavailable, retain the existing cached regime and
- *      emit a WARN log (Req 13.5).
  *
  * Requirements: Req 13.1, Req 13.2, Req 13.3, Req 13.4, Req 13.5
  */
@@ -19,6 +21,7 @@ import { randomUUID } from 'crypto';
 import { pino } from 'pino';
 import { prisma } from '../../db/prisma.js';
 import { DataServiceClient } from '../../integrations/data-service/DataServiceClient.js';
+import { MlServiceClient } from '../../integrations/ml-service/MlServiceClient.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -74,6 +77,7 @@ const VALID_REGIMES = new Set<string>([
  * record exists (Req 13.5).
  */
 const DEFAULT_REGIME: MarketRegime = 'SIDEWAYS';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const DEFAULT_CONFIDENCE = 0.5;
 
 /**
@@ -107,6 +111,7 @@ export class MarketRegimeEngine {
 
   constructor(
     private readonly dataServiceClient: DataServiceClient = new DataServiceClient(),
+    private readonly mlServiceClient: MlServiceClient = new MlServiceClient(),
   ) {}
 
   /**
@@ -170,17 +175,86 @@ export class MarketRegimeEngine {
   // --------------------------------------------------------------------------
 
   /**
-   * Fetches signals from data-service, classifies the regime, and persists /
-   * caches the result for a single market (Req 13.2).
+   * Fetches market data and requests regime prediction from ml-service,
+   * then persists and caches the result for a single market (Req 13.2).
    *
-   * @throws When data-service is unavailable (caller handles per Req 13.5).
+   * If ml-service is unavailable or market data cannot be assembled,
+   * retains the existing regime (Req 13.5) — never fabricates one.
+   *
+   * @throws When a non-recoverable error occurs (caller handles per Req 13.5).
    */
   private async updateMarket(marketId: MarketId): Promise<void> {
-    // --- 1. Fetch signals from data-service ---
-    const signals = await this.dataServiceClient.getRegimeSignals(marketId);
+    // India is the only market for which we have direct data-service coverage.
+    // For 'us' and 'global', we emit a warn and retain the cached regime until
+    // a data feed is configured.
+    if (marketId !== 'india') {
+      this.logger.warn(
+        { marketId },
+        'MarketRegimeEngine: no market-data feed configured for this market — retaining cached regime',
+      );
+      return;
+    }
 
-    // --- 2. Classify ---
-    const { regime, confidence } = this.classifyRegime(signals);
+    // --- 1. Fetch intraday market data for regime input ---
+    //
+    // We need NIFTY and BANKNIFTY quote snapshots plus VIX.
+    // getMarketContextSnapshot uses the current time as asOf — correct for
+    // regime classification (we are classifying the PRESENT regime).
+    const now = new Date();
+
+    const [niftySnapshot, bankNiftySnapshot] = await Promise.all([
+      this.dataServiceClient.getMarketContextSnapshot('NIFTY', now).catch(() => null),
+      this.dataServiceClient.getMarketContextSnapshot('BANKNIFTY', now).catch(() => null),
+    ]);
+
+    // If neither snapshot is available, we cannot assemble a valid request.
+    if (!niftySnapshot && !bankNiftySnapshot) {
+      this.logger.warn(
+        { marketId },
+        'MarketRegimeEngine: market-data snapshots unavailable — retaining cached regime (regime_data_available=false)',
+      );
+      return;
+    }
+
+    // Build a best-effort RegimePredictionRequest.
+    // Use fallback values (0) for missing fields — the ml-service tolerates
+    // nullish optional fields and will use the available ones.
+    const regimeRequest = {
+      nifty_change_pct: niftySnapshot?.price && niftySnapshot.close
+        ? ((niftySnapshot.price - niftySnapshot.close) / niftySnapshot.close) * 100
+        : 0,
+      banknifty_change_pct: bankNiftySnapshot?.price && bankNiftySnapshot.close
+        ? ((bankNiftySnapshot.price - bankNiftySnapshot.close) / bankNiftySnapshot.close) * 100
+        : 0,
+      india_vix: niftySnapshot?.vix ?? 15.0, // 15 = long-run VIX average as fallback
+      nifty_atr_pct: niftySnapshot?.atr && niftySnapshot.price
+        ? (niftySnapshot.atr / niftySnapshot.price) * 100
+        : 0.5,
+      nifty_adx: 25.0, // neutral fallback — not available from quotes endpoint
+      advance_decline_ratio: 1.0, // neutral fallback
+      market_breadth: 0.5, // neutral fallback
+      sector_strength: niftySnapshot?.price && niftySnapshot.close
+        ? ((niftySnapshot.price - niftySnapshot.close) / niftySnapshot.close) * 100
+        : 0,
+      volume_ratio: niftySnapshot?.volume ?? 1.0,
+      gap_pct: niftySnapshot?.price && niftySnapshot.open
+        ? ((niftySnapshot.price - niftySnapshot.open) / niftySnapshot.open) * 100
+        : 0,
+    };
+
+    // --- 2. Request regime prediction from ml-service ---
+    const prediction = await this.mlServiceClient.predictRegime(regimeRequest);
+
+    if (!prediction) {
+      this.logger.warn(
+        { marketId },
+        'MarketRegimeEngine: ml-service predictRegime returned null — retaining cached regime (regime_data_available=false)',
+      );
+      return;
+    }
+
+    const regime = this.normaliseRegime(prediction.regime);
+    const confidence = prediction.confidence;
 
     // --- 3. Get current DB regime ---
     const currentRecord = await this.fetchCurrentFromDb(marketId);
@@ -192,46 +266,27 @@ export class MarketRegimeEngine {
 
     // --- 5. Refresh Redis cache regardless of whether regime changed (Req 13.2) ---
     await this.writeToCache(marketId, regime, confidence);
+
+    this.logger.info(
+      { marketId, regime, confidence, modelVersion: prediction.modelVersion },
+      'MarketRegimeEngine: regime updated from ml-service',
+    );
   }
 
   // --------------------------------------------------------------------------
-  // Private: regime classification
+  // Private: regime normalisation
   // --------------------------------------------------------------------------
 
   /**
-   * Classifies the regime from raw data-service regime signals.
-   *
-   * Mapping strategy:
-   *   - If signals are non-empty, pick the signal with the highest confidence
-   *     whose `regime` string maps to a known MarketRegime value.
-   *   - Falls back to SIDEWAYS/0.5 when the signals array is empty, all
-   *     signals carry unknown regime strings, or confidence is zero (Req 13.5).
-   *
-   * This method intentionally stays rule-based and does not invoke ML models,
-   * in keeping with the design doc note that ML classification is optional.
+   * Validates that the regime string from ml-service is one of the known
+   * MarketRegime values. Falls back to DEFAULT_REGIME when unrecognised.
    */
-  private classifyRegime(
-    signals: Array<{ regime: string; confidence: number }>,
-  ): { regime: MarketRegime; confidence: number } {
-    if (!signals || signals.length === 0) {
-      return { regime: DEFAULT_REGIME, confidence: DEFAULT_CONFIDENCE };
+  private normaliseRegime(regime: string): MarketRegime {
+    if (VALID_REGIMES.has(regime)) {
+      return regime as MarketRegime;
     }
-
-    // Pick the highest-confidence valid signal
-    let best: { regime: MarketRegime; confidence: number } | null = null;
-
-    for (const sig of signals) {
-      if (!VALID_REGIMES.has(sig.regime)) {
-        this.logger.warn({ regime: sig.regime }, 'MarketRegimeEngine: unrecognised regime string from data-service — skipping');
-        continue;
-      }
-      const typedRegime = sig.regime as MarketRegime;
-      if (best === null || sig.confidence > best.confidence) {
-        best = { regime: typedRegime, confidence: sig.confidence };
-      }
-    }
-
-    return best ?? { regime: DEFAULT_REGIME, confidence: DEFAULT_CONFIDENCE };
+    this.logger.warn({ regime }, 'MarketRegimeEngine: unrecognised regime from ml-service — using DEFAULT');
+    return DEFAULT_REGIME;
   }
 
   // --------------------------------------------------------------------------

@@ -44,10 +44,10 @@ export interface SurpriseResult {
 // ---------------------------------------------------------------------------
 
 /** Maximum absolute value the surprise score is capped to (Req 14.1). */
-const SURPRISE_CAP = 5.0 as const;
+const SURPRISE_CAP = 5.0;
 
 /** Decimal places the surprise score is rounded to (Req 14.1). */
-const ROUND_PRECISION = 4 as const;
+const ROUND_PRECISION = 4;
 
 /** Factor used for rounding to ROUND_PRECISION decimal places. */
 const ROUND_FACTOR = Math.pow(10, ROUND_PRECISION); // 10_000

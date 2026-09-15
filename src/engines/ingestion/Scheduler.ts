@@ -39,7 +39,7 @@ import { prisma } from '../../db/prisma.js';
 
 // TODO: replace with `import { QUEUE_NAMES } from '../../queue/queues.js'` once
 //       that module is created in task 4-queue-setup.
-const RAW_QUEUE_NAME = 'news.raw' as const;
+const RAW_QUEUE_NAME = 'news.raw';
 
 // ---------------------------------------------------------------------------
 // Logger

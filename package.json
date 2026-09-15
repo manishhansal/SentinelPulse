@@ -3,17 +3,47 @@
   "version": "1.0.0",
   "description": "Production-grade market intelligence and news impact engine for AlphaForge",
   "type": "module",
-  "main": "dist/app.js",
+  "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/app.ts",
-    "start": "node dist/app.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
+
+    "dev":   "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+
+    "worker:normalize": "tsx src/workers/normalize.worker.ts",
+    "worker:dedup":     "tsx src/workers/dedup.worker.ts",
+    "worker:entity":    "tsx src/workers/entity.worker.ts",
+    "worker:event":     "tsx src/workers/event.worker.ts",
+    "worker:sentiment": "tsx src/workers/sentiment.worker.ts",
+    "worker:impact":    "tsx src/workers/impact.worker.ts",
+    "worker:feature":   "tsx src/workers/feature.worker.ts",
+    "worker:embed":     "tsx src/workers/embed.worker.ts",
+
+    "cron:velocity": "tsx src/engines/velocity/velocity-cron.ts",
+    "cron:breadth":  "tsx src/engines/breadth/breadth-cron.ts",
+    "cron:regime":   "tsx src/engines/market-regime/regime-cron.ts",
+
+    "scheduler": "tsx src/scripts/run-scheduler.ts",
+
+    "seed": "tsx src/scripts/seed-sources.ts",
+
+    "docker:build": "docker compose -f docker/docker-compose.yml --env-file .env.local build",
+    "docker:up":    "docker compose -f docker/docker-compose.yml --env-file .env.local up -d",
+    "docker:down":  "docker compose -f docker/docker-compose.yml --env-file .env.local down",
+    "docker:ps":    "docker compose -f docker/docker-compose.yml --env-file .env.local ps",
+    "docker:logs":  "docker compose -f docker/docker-compose.yml --env-file .env.local logs -f",
+
+    "test":          "vitest run",
+    "test:watch":    "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint src --ext .ts",
+    "test:lookahead":"tsx tests/ci/look-ahead-check.ts",
+
+    "lint":     "eslint src",
+    "lint:fix": "eslint src --fix",
+
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy"
+    "prisma:migrate":  "prisma migrate deploy",
+    "prisma:studio":   "prisma studio"
   },
   "dependencies": {
     "@fastify/cors": "9.0.1",
@@ -30,6 +60,7 @@
     "pino": "9.6.0",
     "pino-pretty": "13.0.0",
     "prom-client": "15.1.3",
+    "prisma": "5.22.0",
     "uuid": "11.0.5",
     "zod": "3.24.2"
   },
@@ -41,7 +72,6 @@
     "@vitest/coverage-v8": "3.0.5",
     "eslint": "9.20.1",
     "prettier": "3.5.1",
-    "prisma": "5.22.0",
     "tsx": "4.19.3",
     "typescript": "5.7.3",
     "vitest": "3.0.5"

@@ -176,3 +176,41 @@ The CI pipeline includes an automated look-ahead leakage check (`tests/ci/look-a
 When the feature schema changes, `FEATURE_VERSION` (semver) is incremented and a backfill job is enqueued to recompute historical events under the new version. Old feature_version records are never modified or deleted — they coexist in `news_features` and can be queried by version.
 
 `feature_version` and `pipeline_version` must be valid semver strings (`MAJOR.MINOR.PATCH`). The application refuses to start if either is malformed.
+
+---
+
+## Phase 3A: ML Feature Contract
+
+The complete ML feature contract for SentinelPulse → ml-service integration is documented in:
+
+**[docs/SENTINELPULSE_ML_FEATURE_CONTRACT.md](SENTINELPULSE_ML_FEATURE_CONTRACT.md)**
+
+This document supersedes any feature descriptions in this file for Phase 3B onwards. It defines:
+- 6 core features (minimum viable set for any ML experiment)
+- 12 extended features for ablation evaluation
+- Point-in-time constraints per feature
+- Freshness states and null behavior
+- Python schema for ml-service `StockFeatures` extension
+- API contract for AlphaForge → SentinelPulse integration
+
+### Phase 3A Additions to FeatureVector
+
+Two new fields are now available in the `news_articles` table and flow through to feature vectors:
+
+| Field | Type | Description |
+|---|---|---|
+| `content_depth` | string | FULL_ARTICLE \| SUMMARY \| HEADLINE_ONLY |
+| `content_quality_score` | float [0,1] | Composite quality: depth weight × timestamp confidence × truncation penalty |
+
+These affect `sourceReliability` sub-score in `news_importance`:
+```
+source_confidence = source_reliability × 0.6 + content_quality_score × 0.4
+```
+
+### LookAheadGuard Behavior (Phase 3A Observation)
+
+In Phase 3A, the LookAheadGuard correctly blocked feature generation for articles published in 2009–2024 (from ET RSS historical feed) because `sentiment.computedAt` (2026) > `article.publishedAt` (2009–2024).
+
+For historical backfill (Phase 3B), the sentiment pipeline must use the article's original `publishedAt` as the computation anchor, not `new Date()`. Otherwise the guard will block all historical feature generation.
+
+**Look-ahead violations in Phase 3A:** 0 (CI check confirmed)

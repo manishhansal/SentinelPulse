@@ -85,10 +85,10 @@ export class BloombergAdapter extends AbstractNewsSourceAdapter {
   // ------------------------------------------------------------------
   // NewsSourceAdapter identity
   // ------------------------------------------------------------------
-  readonly sourceId = 'bloomberg' as const;
-  readonly sourceName = 'Bloomberg' as const;
-  readonly adapterVersion = '1.0.0' as const;
-  readonly tier = 2 as const;
+  readonly sourceId = 'bloomberg';
+  readonly sourceName = 'Bloomberg';
+  readonly adapterVersion = '1.0.0';
+  readonly tier = 2;
 
   // ------------------------------------------------------------------
   // Configuration read from environment at construction time
@@ -376,6 +376,8 @@ export class BloombergAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'FULL_ARTICLE' as const,
+      contentQualityScore: 0.9,
     };
   }
 

@@ -47,9 +47,9 @@ const logger = pino({ name: 'coindesk-adapter' });
 // Constants
 // ---------------------------------------------------------------------------
 
-const COINDESK_SOURCE_ID = 'coindesk' as const;
-const COINDESK_SOURCE_NAME = 'CoinDesk' as const;
-const ADAPTER_VERSION = '1.0.0' as const;
+const COINDESK_SOURCE_ID = 'coindesk';
+const COINDESK_SOURCE_NAME = 'CoinDesk';
+const ADAPTER_VERSION = '1.0.0';
 
 /** Default RSS feed URL. Overridable via NEWS_SOURCE_COINDESK_BASE_URL. */
 const DEFAULT_FEED_URL = 'https://www.coindesk.com/arc/outboundfeeds/rss/';
@@ -97,7 +97,7 @@ export class CoinDeskAdapter extends AbstractNewsSourceAdapter {
   readonly sourceId = COINDESK_SOURCE_ID;
   readonly sourceName = COINDESK_SOURCE_NAME;
   readonly adapterVersion = ADAPTER_VERSION;
-  readonly tier = 2 as const;
+  readonly tier = 2;
 
   // ------------------------------------------------------------------
   // Configuration
@@ -159,7 +159,7 @@ export class CoinDeskAdapter extends AbstractNewsSourceAdapter {
     try {
       const res = await this.http.get<string>(this.feedUrl, {
         responseType: 'text',
-        maxContentLength: 4096, // Only need enough to detect a valid response
+        maxContentLength: 512_000, // Only need enough to detect a valid response
       });
       const latencyMs = Date.now() - start;
       const healthy = res.status >= 200 && res.status < 300;
@@ -365,6 +365,8 @@ export class CoinDeskAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'SUMMARY' as const,
+      contentQualityScore: 0.5,
     };
   }
 

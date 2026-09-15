@@ -283,7 +283,7 @@ export class FeatureEngineeringEngine {
     // Encode surprise_direction as ordinal int
     // -----------------------------------------------------------------------
     const surpriseDir = (eventRow?.surpriseDirection ?? 'UNKNOWN') as SurpriseDirection;
-    const surpriseDirEncoded = SURPRISE_DIRECTION_VALUES.indexOf(surpriseDir as (typeof SURPRISE_DIRECTION_VALUES)[number]);
+    const surpriseDirEncoded = SURPRISE_DIRECTION_VALUES.indexOf(surpriseDir);
 
     // -----------------------------------------------------------------------
     // Cross-market: count active relationships and encode dominant direction
@@ -773,7 +773,7 @@ export class FeatureEngineeringEngine {
  * Coerces a Prisma Decimal/number/null/undefined field to number | null.
  */
 function toNum(value: unknown): number | null {
-  if (value == null) return null;
+  if (value === null || value === undefined) return null;
   const n = Number(value);
   return isFinite(n) ? n : null;
 }
@@ -819,10 +819,10 @@ function buildOneHotFeatures(
  * Returns null when the key is absent or the value is non-numeric.
  */
 function extractSubScore(subScores: unknown, key: string): number | null {
-  if (subScores == null || typeof subScores !== 'object') return null;
+  if (subScores === null || subScores === undefined || typeof subScores !== 'object') return null;
   const record = subScores as Record<string, unknown>;
   const val = record[key];
-  if (val == null) return null;
+  if (val === null || val === undefined) return null;
   const n = Number(val);
   return isFinite(n) ? n : null;
 }

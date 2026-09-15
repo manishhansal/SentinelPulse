@@ -505,6 +505,7 @@ const samplesQuerySchema = z.object({
  *
  * Requirements: Req 22.5, Req 25.3
  */
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function registerMLSamplesRoute(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/ml/training/samples',

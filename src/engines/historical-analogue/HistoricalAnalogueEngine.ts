@@ -39,22 +39,22 @@ const logger = pino({ name: 'HistoricalAnalogueEngine' });
 // ---------------------------------------------------------------------------
 
 /** Default number of analogues to return. */
-const DEFAULT_TOP_N = 10 as const;
+const DEFAULT_TOP_N = 10;
 
 /** Minimum valid topN value (Req 19.1). */
-const MIN_TOP_N = 1 as const;
+const MIN_TOP_N = 1;
 
 /** Maximum valid topN value (Req 19.1). */
-const MAX_TOP_N = 100 as const;
+const MAX_TOP_N = 100;
 
 /** Minimum similarity score — analogues below this threshold are excluded (Req 19.1). */
-const MIN_SIMILARITY = 0.5 as const;
+const MIN_SIMILARITY = 0.5;
 
 /** Hard response timeout in milliseconds before throwing TimeoutError (Req 19.5). */
-const HARD_TIMEOUT_MS = 5_000 as const;
+const HARD_TIMEOUT_MS = 5_000;
 
 /** Minimum analogue count required for regime-filtered results to suppress warning (Req 19.4). */
-const MIN_REGIME_MATCH = 2 as const;
+const MIN_REGIME_MATCH = 2;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -638,7 +638,7 @@ export class HistoricalAnalogueEngine {
         },
         (err: unknown) => {
           clearTimeout(timer);
-          reject(err);
+          reject(err instanceof Error ? err : new Error(String(err)));
         },
       );
     });

@@ -21,6 +21,7 @@ const searchQuerySchema = z.object({
  *
  * Requirements: Req 18.3, Req 25.1
  */
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function registerSearchRoute(app: FastifyInstance, embeddingEngine: EmbeddingEngine): Promise<void> {
   app.get('/api/v1/news/search', {
     schema: {

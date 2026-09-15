@@ -52,9 +52,9 @@ const logger = pino({ name: 'economic-times-adapter' });
 // Constants
 // ---------------------------------------------------------------------------
 
-const ET_SOURCE_ID = 'economic-times' as const;
-const ET_SOURCE_NAME = 'Economic Times' as const;
-const ADAPTER_VERSION = '1.0.0' as const;
+const ET_SOURCE_ID = 'economic-times';
+const ET_SOURCE_NAME = 'Economic Times';
+const ADAPTER_VERSION = '1.0.0';
 
 /** Default RSS feed URL. Overridable via NEWS_SOURCE_ECONOMICTIMES_BASE_URL. */
 const DEFAULT_FEED_URL =
@@ -90,7 +90,7 @@ export class EconomicTimesAdapter extends AbstractNewsSourceAdapter {
   readonly sourceId = ET_SOURCE_ID;
   readonly sourceName = ET_SOURCE_NAME;
   readonly adapterVersion = ADAPTER_VERSION;
-  readonly tier = 1 as const;
+  readonly tier = 1;
 
   // ------------------------------------------------------------------
   // Configuration
@@ -184,7 +184,7 @@ export class EconomicTimesAdapter extends AbstractNewsSourceAdapter {
     try {
       const res = await this.http.get<string>(this.feedUrl, {
         responseType: 'text',
-        maxContentLength: 4096,
+        maxContentLength: 512_000,
       });
       const latencyMs = Date.now() - start;
       const healthy = res.status >= 200 && res.status < 300;
@@ -380,6 +380,8 @@ export class EconomicTimesAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'SUMMARY' as const,
+      contentQualityScore: 0.5,
     };
   }
 

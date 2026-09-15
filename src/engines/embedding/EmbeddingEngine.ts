@@ -43,13 +43,13 @@ const logger = pino({ name: 'EmbeddingEngine' });
 // ---------------------------------------------------------------------------
 
 /** Default embedding model if not overridden via env or constructor. */
-const DEFAULT_MODEL = 'text-embedding-3-large' as const;
+const DEFAULT_MODEL = 'text-embedding-3-large';
 
 /** Default vector dimension matching text-embedding-3-large output. */
-const DEFAULT_DIMENSION = 1536 as const;
+const DEFAULT_DIMENSION = 1536;
 
 /** BullMQ job name used when enqueuing a failed embedding for retry. */
-const RETRY_JOB_NAME = 'embedding.retry' as const;
+const RETRY_JOB_NAME = 'embedding.retry';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,6 +57,32 @@ const RETRY_JOB_NAME = 'embedding.retry' as const;
 
 /** The three entity categories that can be embedded. */
 export type EmbeddingEntityType = 'article' | 'event' | 'entity';
+
+/**
+ * Explicit lifecycle status for an embedding attempt.
+ *
+ *   COMPLETED  — embedding generated and stored successfully
+ *   PENDING    — enqueued for retry (API failure, will be retried by embed.worker)
+ *   SKIPPED    — EMBEDDING_API_KEY not configured; embedding explicitly not attempted
+ *   FAILED     — all retry attempts exhausted
+ *
+ * Core pipeline stages (event, sentiment, impact, features) MUST continue
+ * regardless of embedding status — embeddings are a non-blocking enrichment.
+ */
+export type EmbeddingStatus = 'COMPLETED' | 'PENDING' | 'SKIPPED' | 'FAILED';
+
+/**
+ * Result returned by generateAndStore().
+ * available = false when the API key is missing or all retries failed.
+ */
+export interface EmbeddingOutcome {
+  /** Whether an embedding is available (true only for COMPLETED). */
+  embedding_available: boolean;
+  /** Lifecycle status of the embedding attempt. */
+  embedding_status: EmbeddingStatus;
+  /** Populated only when embedding_available = true. */
+  result: EmbeddingResult | null;
+}
 
 /** Return value for a successful generateAndStore call. */
 export interface EmbeddingResult {
@@ -127,18 +153,34 @@ export class EmbeddingEngine {
    * Generates an embedding for `text` via the OpenAI API and stores it in
    * `news_embeddings` (upsert by entity_type + entity_id + model_version).
    *
-   * On API failure the entity is enqueued on `news.embeddings` for later retry
-   * using the queue's built-in exponential backoff policy (Req 18.1).
+   * This method is NON-BLOCKING for the core news pipeline:
+   *   - If EMBEDDING_API_KEY is not configured → returns SKIPPED immediately.
+   *   - On API failure → enqueues for retry, returns PENDING.
+   *   - Core pipeline stages MUST continue regardless of the returned status.
    *
-   * @returns EmbeddingResult on success, or null when enqueued for retry.
+   * @returns EmbeddingOutcome with explicit embedding_available + embedding_status.
    *
-   * Requirements: Req 18.1, Req 18.2
+   * Requirements: Req 18.1, Req 18.2, Phase 3A non-blocking embedding mandate
    */
   async generateAndStore(
     text: string,
     entityType: EmbeddingEntityType,
     entityId: string,
-  ): Promise<EmbeddingResult | null> {
+  ): Promise<EmbeddingOutcome> {
+    // 0. Short-circuit when API key is absent — SKIPPED, never throws ------
+    const apiKey = process.env['EMBEDDING_API_KEY'] ?? '';
+    if (!apiKey) {
+      logger.debug(
+        { entityType, entityId },
+        '[EmbeddingEngine] EMBEDDING_API_KEY not configured — skipping (non-blocking)',
+      );
+      return {
+        embedding_available: false,
+        embedding_status: 'SKIPPED',
+        result: null,
+      };
+    }
+
     // 1. Call OpenAI Embeddings API ----------------------------------------
     let vector: number[];
 
@@ -161,7 +203,11 @@ export class EmbeddingEngine {
 
       // 2. Enqueue for retry with exponential backoff (Req 18.1) -------------
       await this.enqueueForRetry(text, entityType, entityId);
-      return null;
+      return {
+        embedding_available: false,
+        embedding_status: 'PENDING',
+        result: null,
+      };
     }
 
     // 3. Store in news_embeddings via pgvector (Req 18.2) -------------------
@@ -173,10 +219,14 @@ export class EmbeddingEngine {
     );
 
     return {
-      entityType,
-      entityId,
-      modelVersion: this.modelVersion,
-      dimension: this.dimension,
+      embedding_available: true,
+      embedding_status: 'COMPLETED',
+      result: {
+        entityType,
+        entityId,
+        modelVersion: this.modelVersion,
+        dimension: this.dimension,
+      },
     };
   }
 

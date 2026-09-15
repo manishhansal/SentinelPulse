@@ -172,3 +172,23 @@ GET /api/v1/admin/ingestion
 ```
 
 The `errors` array will include `news_processing_errors` records with `stage = "backfill"` for any articles that failed.
+
+---
+
+## Phase 3B Gate — Do Not Backfill Until
+
+The historical backfill (2024-01-01 → present) must not begin until ALL of the following are confirmed:
+
+| Pre-condition | Status | Verified by |
+|---|---|---|
+| 5-minute smoke test passed | ✓ DONE | PHASE3A_SMOKE_TEST.md |
+| 1-hour live run stable | ✓ DONE | PHASE3A_RUNTIME_CERTIFICATION_REPORT.md |
+| Look-ahead check passes on populated DB | ✓ DONE | `npx tsx tests/ci/look-ahead-check.ts` |
+| Entity resolution validated | ✓ DONE | 26.1% rate, 2-layer resolution working |
+| Regime integration fixed | ✓ DONE | MlServiceClient wired |
+| Stale-data protection verified | ✓ DONE | DataFreshness.ts deployed |
+| ML feature contract finalized | ✓ DONE | docs/SENTINELPULSE_ML_FEATURE_CONTRACT.md |
+
+**Recommended backfill range for Phase 3B:** Start with 2024-01-01 to present with `batchSize=50`.
+
+**ET historical content note:** The Economic Times RSS feed includes articles dating back to 2009–2010. For the backfill, use a date filter: `startDate >= 2024-01-01`. The LookAheadGuard will block feature generation on old articles where `sentiment.computedAt > article.publishedAt` — this is correct behavior for real-time sentiment, but will reduce feature coverage for historical data. For historical backfill, a dedicated backfill-mode sentiment engine that uses the article's original publication time as `computedAt` will be needed (Phase 3B scope).
