@@ -2,89 +2,38 @@
 
 ## What Is SentinelPulse?
 
-SentinelPulse is a production-grade service that transforms raw financial news into structured, evidence-backed market intelligence for the **AlphaForge signal engine** and **ml-service**. It is not a news aggregator — it is a multi-stage processing pipeline that ingests articles from six financial news sources, enriches them through 18 sequential intelligence engines, and produces calibrated impact scores, sentiment vectors, entity links, historical analogues, and ML-ready feature vectors.
+SentinelPulse is a production-grade service that transforms raw financial news into structured, evidence-backed market intelligence for the **AlphaForge signal engine** and **ml-service**. It is not a news aggregator — it is a multi-stage processing pipeline that ingests articles from financial news sources, enriches them through sequential intelligence engines, and produces calibrated impact scores, sentiment vectors, entity links, and ML-ready feature vectors.
 
 Every output is point-in-time correct (enforced by `LookAheadGuard`), source-isolated (enforced by `CircuitBreaker` per adapter), and fully traceable from `TrainingSample` back to the original raw article.
+
+> **Phase 3A status:** Runtime certified. 4 live sources ingesting. Full pipeline operational.  
+> See `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` for the complete audit.
 
 ### Pipeline Overview
 
 ```
-Raw News (6 Sources)
+Raw News (4 active sources)
   ↓
-Ingestion Engine  ←  CircuitBreaker + RateLimiter + SSRF Guard
-  ↓  news.raw
-NormalizationEngine   (HTML strip · language detect · SHA-256 hashes · taxonomy)
+Ingestion Scheduler  ←  CircuitBreaker + RateLimiter + SSRF Guard
+  ↓  news.raw (BullMQ)
+normalize.worker    → HTML strip · language detect · SHA-256 hash · taxonomy · content_depth
   ↓  news.normalized
-DeduplicationEngine   (exact hash match · Jaro-Winkler · cosine embeddings · NewsCluster)
+dedup.worker        → exact hash · near-duplicate · NewsCluster assignment
   ↓  news.deduplicated
-EntityResolutionEngine  (NER · InstrumentMaster lookup · asset/sector links)
+entity.worker       → NER · InstrumentIndex (34K instruments) · asset/sector links
   ↓  news.entities
-EventDetectionEngine  (14 event types · surprise score · SurpriseScoreCalculator)
+event.worker        → 14 event types · surprise score
   ↓  news.events
-SentimentEngine   (5 dimensions · 9 qualitative signals · lexicon model)
+sentiment.worker    → 5 sentiment dimensions · 9 qualitative signals
   ↓  news.sentiment
-ImportanceEngine  (9 sub-scores · historical impact · novelty · surprise multiplier)
+impact.worker       → ImportanceEngine (9 sub-scores) · MarketImpactEngine
   ↓  news.impact
-MarketImpactEngine  (IndianMarketImpactEngine · NewsImpactScore · cross-market relationships)
-  ↓
-HistoricalReactionEngine   (9 time offsets · return_1m…return_1d · data-service)
-  ↓
-FeatureEngineeringEngine   (7 feature groups · LookAheadGuard · 500ms publish SLA)
+feature.worker      → HistoricalReactionEngine · FeatureEngineeringEngine · LookAheadGuard
   ↓  news.features
-MLDatasetGenerator   (forward returns · directional labels · TrainingSample)
+embed.worker        → OpenAI embeddings (non-blocking; SKIPPED if no API key)
   ↓
-AlphaForge Signal Engine  /  ml-service
+AlphaForge API  /  ml-service  /  Admin API
 ```
-
----
-
-## Features
-
-- **6 pluggable news source adapters** — Tier-1: Reuters, Moneycontrol, Economic Times; Tier-2: Bloomberg, Financial Times, CoinDesk. Each adapter runs in a circuit-isolated ingestion lane with independent rate limiting and enable/disable flags.
-- **18 intelligence engines** forming a sequential BullMQ pipeline — normalization through ML dataset generation, each engine independently scalable and fault-tolerant.
-- **Multi-dimensional sentiment** — 5 orthogonal dimensions: `overall`, `market`, `company`, `macro`, `risk`. Driven by a financial-domain lexicon model augmented with 9 qualitative signals (urgency, certainty, temporal proximity, magnitude, credibility, market impact, direction clarity, volatility, systemic risk).
-- **9-sub-score importance scoring** with a surprise multiplier — source credibility, event severity, market breadth, time sensitivity, novelty, cross-asset impact, macroeconomic relevance, historical impact correlation, and social amplification.
-- **Indian market impact engine** — covers NIFTY50, BANKNIFTY, sectoral indices (NIFTY Bank, IT, Pharma, Auto, Energy, FMCG, Metals, Realty), and individual NSE/BSE-listed stocks. Impact direction (BULLISH/BEARISH/NEUTRAL), strength (0–1), confidence (0–1), and horizon (1m / 5m / 15m / 1h / 1d) per asset.
-- **Cross-market relationship graph** — empirically calibrated correlations (CRUDE→AVIATION, USD→NIFTY, FII_FLOWS→BROAD_MARKET, etc.) updated from rolling historical data, not hardcoded rules.
-- **Historical reaction engine** — measures actual price/volume responses at 9 time offsets (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 1d) and feeds the reaction data back for ML training labels.
-- **LookAheadGuard** — hard enforcement of point-in-time correctness. Throws `LookAheadBiasError` with full diagnostic context if any data source carries a timestamp after `event_timestamp`. The CI pipeline runs an automated scanner against all `FeatureVector` records.
-- **Semantic search** via pgvector HNSW index — p95 < 500ms for a 1M-article corpus. Supports similarity threshold, regime filter, and topK pagination.
-- **Historical analogue engine** — finds semantically similar past events and returns aggregate statistics: median return, win rate, max adverse excursion, and inter-quartile range for each time horizon.
-- **Redis caching** — 10 cache keys with explicit TTLs (30s for real-time context, 5m for regime, 15m for sector aggregates, 60m for training samples).
-- **Full REST API** — news intelligence, AlphaForge integration, ML/data, admin. All endpoints behind Bearer auth with 300 RPM rate limiting.
-- **Prometheus metrics + pino structured logging** — `/metrics`, `/health`, `/ready` built-in.
-- **GitHub Actions CI** — TypeScript type-check, coverage gate (≥80%), look-ahead leakage scan, and documentation presence check on every pull request.
-
----
-
-## Architecture
-
-SentinelPulse runs as a set of independent Node.js processes that communicate exclusively through **BullMQ queues** backed by Redis. There is no direct inter-process RPC. Each worker subscribes to one input queue, processes a job, and enqueues the enriched payload to the next stage.
-
-This design means any worker can be scaled horizontally without touching the others. The API server is stateless and can run behind a load balancer at any concurrency.
-
-### Worker / Queue Topology
-
-| Worker | Input Queue | Output Queue |
-|---|---|---|
-| news-normalize-worker | `news.raw` | `news.normalized` |
-| news-dedup-worker | `news.normalized` | `news.deduplicated` |
-| news-entity-worker | `news.deduplicated` | `news.entities` |
-| news-event-worker | `news.entities` | `news.events` |
-| news-sentiment-worker | `news.events` | `news.sentiment` |
-| news-impact-worker (×2) | `news.sentiment` / `news.impact` | `news.impact` / — |
-| news-feature-worker | `news.impact` | `news.features` |
-| news-embed-worker | `news.embeddings` | — |
-
-Every queue has a corresponding `news.{stage}.deadletter` DLQ. Failed jobs (after exhausting retries) are moved to the DLQ intact — headers, payload, error context — so they can be inspected via the admin API and manually replayed without data loss.
-
-Three cron processes run on schedule outside the queue topology:
-
-| Cron Process | Schedule | Purpose |
-|---|---|---|
-| VelocityEngine | Every 60s | Computes rolling news velocity per asset and sector |
-| BreadthEngine | Every 5 min | Computes market breadth (advancing/declining article ratio) |
-| MarketRegimeEngine | Every 15 min | Updates market regime classification (RISK_ON / RISK_OFF / NEUTRAL / CRISIS) |
 
 ---
 
@@ -92,223 +41,513 @@ Three cron processes run on schedule outside the queue topology:
 
 | Dependency | Version | Notes |
 |---|---|---|
-| Node.js | 20 LTS | Required. Use nvm or volta to pin the version. |
-| PostgreSQL | 16 + pgvector | The `vector` extension must be installed before running migrations. |
-| Redis | 7 | Used for BullMQ queues and response caching. |
-| Docker & Docker Compose | Latest stable | Required for the infrastructure services. |
-| Python | 3.11 | Powers the Scrapling sidecar for JavaScript-rendered pages. |
+| Node.js | ≥ 20 LTS | Use nvm: `nvm use 20` |
+| PostgreSQL | 16 + pgvector | TimescaleDB with pgvector; must have `vector` extension |
+| Redis | 7 | Shared with AlphaForge in the local dev stack |
+| Docker & Docker Compose | Latest stable | For the full containerised stack |
+| Python | 3.11+ | Powers the Scrapling sidecar |
 
 ---
 
-## Quick Start (Docker Compose)
+## Running with Docker (Recommended)
 
-The fastest path to a running instance:
+The Docker stack manages the API, all 8 workers, 3 cron processes, and the Scrapling sidecar as named `sentinel-pulse-*` containers. PostgreSQL and Redis are provided by the existing AlphaForge stack — no separate infra containers needed.
+
+### One-time setup
 
 ```bash
-# 1. Enter the project directory
-cd sentinel-pulse
-
-# 2. Set up environment variables
-cp .env.example .env.local
-# Edit .env.local — at minimum set DATABASE_URL, REDIS_URL, and SENTINEL_API_KEY
-
-# 3. Start infrastructure services
-docker compose up -d postgres redis scrapling
-
-# 4. Install Node.js dependencies
+# 1. Clone and install
+git clone https://github.com/manishhansal/SentinelPulse.git
+cd SentinelPulse
 npm install
 
-# 5. Run database migrations
-npx prisma migrate deploy
+# 2. Configure environment (copy template then fill in secrets)
+cp .env.example .env.local
+# Edit .env.local — the defaults work for the AlphaForge local dev stack
 
-# 6. Generate the Prisma client
-npx prisma generate
+# 3. Build all images
+npm run docker:build
+```
 
-# 7. Start the API server with hot reload
+### Start the stack
+
+```bash
+# Start everything (migrations run automatically inside the api container)
+npm run docker:up
+
+# Seed news sources (first time only — idempotent, safe to re-run)
+docker compose -f docker/docker-compose.yml --env-file .env.local \
+  run --rm scheduler node dist/scripts/seed-sources.js
+```
+
+### Verify
+
+```bash
+# Show all running containers
+npm run docker:ps
+
+# API health checks
+curl http://localhost:3001/health
+# → {"status":"alive","timestamp":"..."}
+
+curl http://localhost:3001/ready
+# → {"status":"ready","checks":{"postgres":"ok","redis":"ok","tier1_sources":"ok"}}
+
+# Scrapling sidecar
+curl http://localhost:8001/health
+# → {"status":"healthy"}
+```
+
+### Logs
+
+```bash
+# All services, live tail
+npm run docker:logs
+
+# Single service
+docker compose -f docker/docker-compose.yml --env-file .env.local logs -f api
+docker compose -f docker/docker-compose.yml --env-file .env.local logs -f scheduler
+docker compose -f docker/docker-compose.yml --env-file .env.local logs -f worker-normalize
+
+# Multiple services at once
+docker compose -f docker/docker-compose.yml --env-file .env.local \
+  logs -f api worker-normalize worker-dedup worker-entity
+
+# All workers
+docker compose -f docker/docker-compose.yml --env-file .env.local \
+  logs -f worker-normalize worker-dedup worker-entity worker-event \
+         worker-sentiment worker-impact worker-feature worker-embed
+
+# Last N lines (snapshot, no follow)
+docker compose -f docker/docker-compose.yml --env-file .env.local logs --tail=100 api
+
+# With timestamps
+docker compose -f docker/docker-compose.yml --env-file .env.local logs -f -t api
+
+# Since a point in time
+docker compose -f docker/docker-compose.yml --env-file .env.local logs --since=30m api
+
+# Raw docker logs by container name
+docker logs sentinel-pulse-api-1 -f
+docker logs sentinel-pulse-scheduler-1 --tail=50
+docker logs sentinel-pulse-worker-normalize-1 -f
+```
+
+> **Tip:** Add this alias to `~/.zshrc` to avoid typing the full path each time:
+> ```bash
+> alias sp="docker compose -f $(pwd)/docker/docker-compose.yml --env-file $(pwd)/.env.local"
+> # Then: sp logs -f api   /   sp ps   /   sp down
+> ```
+
+### Stop / restart
+
+```bash
+# Stop all containers (data is preserved in external postgres/redis)
+npm run docker:down
+
+# Restart a single service
+docker compose -f docker/docker-compose.yml --env-file .env.local restart api
+docker compose -f docker/docker-compose.yml --env-file .env.local restart worker-normalize
+
+# Rebuild and restart after code changes
+npm run docker:build && npm run docker:up
+
+# Scale a worker horizontally
+docker compose -f docker/docker-compose.yml --env-file .env.local \
+  up -d --scale worker-normalize=3
+```
+
+---
+
+## Local Development (without Docker)
+
+Use this when you want hot-reload and fast iteration without rebuilding images.
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/manishhansal/SentinelPulse.git
+cd SentinelPulse
+npm install
+```
+
+### 2. Set up environment
+
+```bash
+cp .env.example .env.local
+# Edit .env.local — use localhost URLs for local dev (not host.docker.internal)
+# DATABASE_URL=postgresql://sentinel:sentinel_dev@localhost:5444/sentinel_pulse
+# REDIS_URL=redis://localhost:6379
+```
+
+### 3. Verify infrastructure is running
+
+```bash
+# PostgreSQL on 5444 and Redis on 6379 must be up (from AlphaForge stack)
+docker ps | grep -E "postgres|redis"
+```
+
+### 4. Run migrations and seed
+
+```bash
+set -a && source .env.local && set +a
+
+npm run prisma:migrate   # applies pending migrations
+npm run prisma:generate  # regenerates Prisma client
+npm run seed             # idempotent — inserts news_sources rows
+```
+
+### 5. Start the Scrapling sidecar
+
+```bash
+cd docker
+pip3 install fastapi uvicorn scrapling httpx
+python3 -m uvicorn scrapling_service:app --host 0.0.0.0 --port 8001
+# Verify: curl http://localhost:8001/health → {"status":"healthy"}
+```
+
+### 6. Start the API server
+
+```bash
+set -a && source .env.local && set +a
 npm run dev
+# API running at http://localhost:3001
 ```
 
-The API is now available at `http://localhost:3000`.
+### 7. Start workers (each in its own terminal)
 
-Swagger/OpenAPI is not bundled — use the [API Reference](API.md) for endpoint documentation.
+```bash
+set -a && source .env.local && set +a
+
+npm run worker:normalize
+npm run worker:dedup
+npm run worker:entity
+npm run worker:event
+npm run worker:sentiment
+npm run worker:impact
+npm run worker:feature
+npm run worker:embed
+```
+
+### 8. Start the scheduler
+
+```bash
+set -a && source .env.local && set +a
+NEWS_SOURCE_COINDESK_ENABLED=true npm run scheduler
+# Fetches articles every 60s and publishes to news.raw queue
+```
+
+### 9. Start crons (optional — run in background or separate terminals)
+
+```bash
+set -a && source .env.local && set +a
+
+npm run cron:velocity  # recalculates news velocity every 60s
+npm run cron:breadth   # recalculates market breadth every 5 min
+npm run cron:regime    # updates market regime classification every 15 min
+```
 
 ---
 
-## Running Everything with Docker
+## Quick Start with PM2
 
-To run the full stack (API server, all 8 workers, 3 cron processes, and all infrastructure):
+PM2 manages all processes in one command with automatic restarts.
 
 ```bash
-# Start all 14 services
-docker compose up -d
+npm install -g pm2
+```
 
-# Tail logs from the most important processes
-docker compose logs -f api worker-normalize worker-sentiment
+Create `ecosystem.config.cjs` in the project root:
 
-# Scale a worker horizontally (e.g., 3 normalize workers)
-docker compose up -d --scale worker-normalize=3
+```js
+module.exports = {
+  apps: [
+    { name: 'sentinel-api',       script: 'npx', args: 'tsx src/server.ts',
+      env_file: '.env.local', env: { PORT: '3001' } },
+    { name: 'worker-normalize',   script: 'npx', args: 'tsx src/workers/normalize.worker.ts',   env_file: '.env.local' },
+    { name: 'worker-dedup',       script: 'npx', args: 'tsx src/workers/dedup.worker.ts',       env_file: '.env.local' },
+    { name: 'worker-entity',      script: 'npx', args: 'tsx src/workers/entity.worker.ts',      env_file: '.env.local' },
+    { name: 'worker-event',       script: 'npx', args: 'tsx src/workers/event.worker.ts',       env_file: '.env.local' },
+    { name: 'worker-sentiment',   script: 'npx', args: 'tsx src/workers/sentiment.worker.ts',   env_file: '.env.local' },
+    { name: 'worker-impact',      script: 'npx', args: 'tsx src/workers/impact.worker.ts',      env_file: '.env.local' },
+    { name: 'worker-feature',     script: 'npx', args: 'tsx src/workers/feature.worker.ts',     env_file: '.env.local' },
+    { name: 'worker-embed',       script: 'npx', args: 'tsx src/workers/embed.worker.ts',       env_file: '.env.local' },
+    { name: 'scheduler',          script: 'npx', args: 'tsx src/scripts/run-scheduler.ts',
+      env_file: '.env.local', env: { NEWS_SOURCE_COINDESK_ENABLED: 'true' } },
+    { name: 'cron-velocity',      script: 'npx', args: 'tsx src/engines/velocity/velocity-cron.ts',         env_file: '.env.local' },
+    { name: 'cron-breadth',       script: 'npx', args: 'tsx src/engines/breadth/breadth-cron.ts',           env_file: '.env.local' },
+    { name: 'cron-regime',        script: 'npx', args: 'tsx src/engines/market-regime/regime-cron.ts',      env_file: '.env.local' },
+  ]
+};
+```
 
-# Stop and remove containers (data volumes are preserved)
-docker compose down
+```bash
+pm2 start ecosystem.config.cjs   # start everything
+pm2 status                        # show process table
+pm2 logs                          # tail all logs
+pm2 logs sentinel-api             # API logs only
+pm2 logs worker-normalize         # single worker
+pm2 restart all                   # restart everything
+pm2 stop all                      # stop everything
+pm2 delete all                    # remove from pm2 list
 ```
 
 ---
 
-## Manual Worker Startup
+## Available Scripts
 
-For development and debugging, start workers individually in separate terminal windows or via a process manager like `pm2`:
+### Application
+
+| Script | Command | Description |
+|---|---|---|
+| `npm run dev` | `tsx watch src/server.ts` | API with hot reload (port 3001) |
+| `npm start` | `node dist/server.js` | API from compiled dist (production) |
+| `npm run build` | `tsc` | Compile TypeScript → `dist/` |
+
+### Workers
+
+| Script | Description |
+|---|---|
+| `npm run worker:normalize` | normalize.worker — raw → normalized |
+| `npm run worker:dedup` | dedup.worker — normalized → deduplicated |
+| `npm run worker:entity` | entity.worker — deduplicated → entities |
+| `npm run worker:event` | event.worker — entities → events |
+| `npm run worker:sentiment` | sentiment.worker — events → sentiment |
+| `npm run worker:impact` | impact.worker — sentiment → impact |
+| `npm run worker:feature` | feature.worker — impact → features |
+| `npm run worker:embed` | embed.worker — features → embeddings |
+
+### Background processes
+
+| Script | Description |
+|---|---|
+| `npm run scheduler` | Ingestion scheduler — polls sources every 60s |
+| `npm run cron:velocity` | News velocity recalculation — every 60s |
+| `npm run cron:breadth` | Market breadth recalculation — every 5 min |
+| `npm run cron:regime` | Market regime classification — every 15 min |
+
+### Docker
+
+| Script | Description |
+|---|---|
+| `npm run docker:build` | Build all Docker images |
+| `npm run docker:up` | Start all containers in background |
+| `npm run docker:down` | Stop and remove all containers |
+| `npm run docker:ps` | Show container status |
+| `npm run docker:logs` | Tail all container logs |
+
+### Database
+
+| Script | Description |
+|---|---|
+| `npm run prisma:migrate` | Apply pending migrations |
+| `npm run prisma:generate` | Regenerate Prisma client after schema changes |
+| `npm run prisma:studio` | Open Prisma Studio GUI at localhost:5555 |
+| `npm run seed` | Seed `news_sources` table (idempotent) |
+
+### Testing & quality
+
+| Script | Description |
+|---|---|
+| `npm test` | Full test suite (464 tests) |
+| `npm run test:watch` | Tests in watch mode |
+| `npm run test:coverage` | Tests with coverage report |
+| `npm run test:lookahead` | Look-ahead bias scan (requires DB) |
+| `npm run lint` | ESLint check |
+| `npm run lint:fix` | ESLint auto-fix |
+
+---
+
+## Verifying the Stack is Healthy
 
 ```bash
-# Pipeline workers (start in order for the first run; order doesn't matter once queues have data)
-node dist/workers/normalize.worker.js
-node dist/workers/dedup.worker.js
-node dist/workers/entity.worker.js
-node dist/workers/event.worker.js
-node dist/workers/sentiment.worker.js
-node dist/workers/impact.worker.js
-node dist/workers/feature.worker.js
-node dist/workers/embed.worker.js
+# API liveness
+curl http://localhost:3001/health
+# → {"status":"alive","timestamp":"..."}
+
+# Full readiness (postgres + redis + tier-1 sources reachable)
+curl http://localhost:3001/ready
+# → {"status":"ready","checks":{"postgres":"ok","redis":"ok","tier1_sources":"ok"}}
+
+# Prometheus metrics
+curl http://localhost:3001/metrics | head -20
+
+# Scrapling sidecar
+curl http://localhost:8001/health
+# → {"status":"healthy"}
+
+# Source health and circuit breaker states
+KEY="dev-local-api-key-change-before-sharing"
+curl -s -H "Authorization: Bearer $KEY" \
+  http://localhost:3001/api/v1/admin/sources | python3 -m json.tool
+
+# Data quality metrics (trailing 24h)
+curl -s -H "Authorization: Bearer $KEY" \
+  http://localhost:3001/api/v1/admin/data-quality | python3 -m json.tool
 ```
 
-Cron processes (these run their own internal schedulers):
+---
+
+## Debugging
+
+### Pipeline smoke test (inline — no queues)
 
 ```bash
-# News velocity metrics — fires every 60s
-node dist/engines/velocity/VelocityEngine.js --cron
+KEY="dev-local-api-key-change-before-sharing"
+curl -s -X POST http://localhost:3001/api/v1/admin/test/pipeline \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source_id":"reuters"}' | python3 -m json.tool
+# Returns per-stage results + complete lineage in ~200ms
+```
 
-# Market breadth metrics — fires every 5 min
-node dist/engines/breadth/BreadthEngine.js --cron
+### Trace an article's lineage
 
-# Market regime update — fires every 15 min
-node dist/engines/market-regime/MarketRegimeEngine.js --cron
+```bash
+KEY="dev-local-api-key-change-before-sharing"
+ARTICLE_ID="<uuid from news_articles>"
+curl -s -H "Authorization: Bearer $KEY" \
+  http://localhost:3001/api/v1/admin/lineage/$ARTICLE_ID | python3 -m json.tool
+```
+
+### Check queue depths in Redis
+
+```bash
+docker exec alpha-forge-redis redis-cli
+
+# Queue depths
+LLEN bull:news.raw:wait
+LLEN bull:news.normalized:wait
+ZCARD bull:news.deduplicated:active
+ZCARD bull:news.sentiment:failed     # non-zero = worker issue
+ZCARD bull:news.features:failed
+```
+
+### Look-ahead bias check
+
+```bash
+set -a && source .env.local && set +a
+npm run test:lookahead
+# → PASSED: N FeatureVector(s) checked, 0 violations.
+```
+
+---
+
+## Database Access
+
+### Direct psql (via Docker)
+
+```bash
+docker exec -it data-service-postgres psql -U sentinel -d sentinel_pulse
+
+# Useful queries once connected:
+\dt                           -- list all tables
+\d news_articles              -- describe a table
+
+SELECT
+  (SELECT COUNT(*) FROM news_articles)        AS articles,
+  (SELECT COUNT(*) FROM news_events)           AS events,
+  (SELECT COUNT(*) FROM news_sentiment)        AS sentiment,
+  (SELECT COUNT(*) FROM news_importance)       AS importance,
+  (SELECT COUNT(*) FROM news_entity_mentions)  AS entity_mentions,
+  (SELECT COUNT(*) FROM news_asset_links)      AS asset_links,
+  (SELECT COUNT(*) FROM news_market_impacts)   AS market_impacts,
+  (SELECT COUNT(*) FROM news_features)         AS features;
+
+SELECT source_id, COUNT(*) AS cnt
+FROM news_articles GROUP BY source_id ORDER BY cnt DESC;
+
+SELECT e.event_type, e.actor, i.importance_score
+FROM news_events e JOIN news_importance i ON i.event_id = e.id
+WHERE i.importance_score > 0.5
+ORDER BY i.importance_score DESC LIMIT 10;
+
+SELECT COUNT(*) AS violations FROM news_features f
+JOIN news_events e ON e.id = f.event_id
+WHERE f.computed_at > e.event_timestamp;
+```
+
+### Prisma Studio (GUI)
+
+```bash
+set -a && source .env.local && set +a
+npm run prisma:studio
+# Opens at http://localhost:5555
+```
+
+### Migrations
+
+```bash
+set -a && source .env.local && set +a
+npm run prisma:migrate    # apply pending
+npm run prisma:generate   # regenerate client after schema change
 ```
 
 ---
 
 ## Environment Configuration
 
-SentinelPulse uses three environment files:
-
 | File | Purpose |
 |---|---|
-| `.env.example` | Committed template with placeholder values. Safe to commit. |
-| `.env.local` | Local development overrides. **Never commit.** |
-| `.env.production` | Production template. **Never commit with real secrets.** |
+| `.env.example` | Committed template — safe to commit |
+| `.env.local` | Local dev values — **never commit** |
+| `.env.production` | Production template — **never commit with real secrets** |
 
-Copy the template before first run:
+### Critical variables
 
-```bash
-cp .env.example .env.local
-```
+| Variable | Local dev value | Notes |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://sentinel:sentinel_dev@localhost:5444/sentinel_pulse` | Use `host.docker.internal` instead of `localhost` when running in Docker |
+| `REDIS_URL` | `redis://localhost:6379` | Same — use `host.docker.internal` in Docker |
+| `SENTINEL_API_KEY` | `dev-local-api-key-change-before-sharing` | Any value works locally |
+| `DATA_SERVICE_URL` | `http://localhost:8200` | Use `host.docker.internal` in Docker |
+| `ML_SERVICE_URL` | `http://localhost:8100` | Use `host.docker.internal` in Docker |
+| `SCRAPLING_URL` | `http://localhost:8001` | Use `http://scrapling:8001` in Docker |
+| `PORT` | `3001` | AlphaForge owns port 3000 |
 
-### Critical Required Variables
-
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string (e.g., `postgresql://user:pass@localhost:5432/sentinelpulse`) |
-| `REDIS_URL` | Redis connection string (e.g., `redis://localhost:6379`) |
-| `SENTINEL_API_KEY` | Bearer token for REST API authentication. Use a cryptographically random 32+ byte value. |
-| `DATA_SERVICE_URL` | AlphaForge data-service base URL (e.g., `http://data-service:8080`) |
-| `DATA_SERVICE_API_KEY` | API key for the AlphaForge data-service |
-| `SCRAPLING_URL` | Scrapling sidecar URL (default: `http://localhost:8001`) |
-| `FEATURE_VERSION` | Semver string (e.g., `1.0.0`) — required for ML reproducibility. Bump MINOR on schema changes. |
-| `PIPELINE_VERSION` | Semver string (e.g., `1.0.0`) — required for ML reproducibility. Bump MINOR on logic changes. |
-
-See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the complete variable reference including optional tuning parameters.
-
----
-
-## Available Scripts
-
-| Script | Description |
-|---|---|
-| `npm run dev` | Start the API server with hot reload (tsx watch mode) |
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm start` | Start the compiled API from `dist/` (production mode) |
-| `npm test` | Run the full test suite |
-| `npm run test:watch` | Run tests in watch mode |
-| `npm run test:coverage` | Run tests and generate a coverage report |
-| `npm run lint` | ESLint check across all source files |
-| `npm run prisma:generate` | Regenerate the Prisma client after schema changes |
-| `npm run prisma:migrate` | Run any pending Prisma migrations |
-
----
-
-## Database
-
-SentinelPulse uses **PostgreSQL 16** with the **pgvector** extension. The schema has 23 tables that collectively model the full intelligence pipeline from raw ingestion through ML training data.
-
-### Tables
-
-`news_sources` · `news_articles` · `news_article_versions` · `news_clusters` · `news_events` · `news_article_event_links` · `news_entities` · `news_entity_mentions` · `news_asset_links` · `news_sector_links` · `news_event_relationships` · `news_sentiment` · `news_importance` · `news_market_impacts` · `news_market_reactions` · `news_market_regimes` · `news_features` · `news_embeddings` · `news_training_samples` · `news_source_metrics` · `news_ingestion_runs` · `news_processing_errors` · `news_alerts`
-
-All timestamps are stored as `TIMESTAMPTZ` (UTC). Embeddings use `vector(1536)` with an HNSW index (`lists=100, probes=10`) for sub-500ms semantic search over 1M+ articles.
-
-### Running Migrations
-
-```bash
-npx prisma migrate deploy
-```
-
-See [docs/DATA_MODEL.md](docs/DATA_MODEL.md) for the full schema with column-level documentation.
+See `docs/OPERATIONS.md` for the full variable reference.
 
 ---
 
 ## Testing
 
 ```bash
-# Full test suite (464 tests across 34 files)
-npm test
-
-# Property-based tests only (19 correctness properties via fast-check)
-npx vitest run tests/property/
-
-# Look-ahead bias CI check (scans all FeatureVector records)
-npx tsx tests/ci/look-ahead-check.ts
-
-# Integration tests only
+npm test                        # full suite (464 tests)
+npm run test:watch              # watch mode
+npm run test:coverage           # coverage report
+npm run test:lookahead          # look-ahead bias scan against live DB
+npx vitest run tests/property/  # property-based tests only
 npx vitest run tests/integration/
 ```
-
-### What's Covered
-
-- **Unit tests** — all 18 engines, pure-function coverage for every transformation step and edge case.
-- **Property-based tests** — 19 correctness properties using `fast-check`. Covers Jaro-Winkler similarity bounds, CircuitBreaker state machine invariants, SHA-256 hash determinism, point-in-time correctness (LookAheadGuard), sentiment score bounds, importance normalization, and more.
-- **Integration tests** — Tier-1 source outage simulation (circuit trips, DLQ receives failed jobs, healthy sources continue uninterrupted), API authentication and rate limiting.
-- **CI look-ahead check** — automated scanner that queries all `news_features` records and asserts no feature timestamp post-dates the corresponding event timestamp. Fails the build if any violation is found.
 
 ---
 
 ## API Quick Reference
 
-Base URL: `http://localhost:3000/api/v1`  
-Authentication: `Authorization: Bearer {SENTINEL_API_KEY}`
+Base URL: `http://localhost:3001/api/v1`  
+Auth: `Authorization: Bearer {SENTINEL_API_KEY}`
 
-| Group | Endpoints |
+| Group | Key Endpoints |
 |---|---|
-| News | `GET /news/latest` · `GET /news/assets/:id` · `GET /news/market/india` · `GET /news/events/:id` · `GET /news/impact/:id` · `GET /news/regime` · `GET /news/signal/:id` · `GET /news/search` |
-| AlphaForge | `GET /alphaforge/news-context/:instrument` · `GET /alphaforge/context/market` · `GET /alphaforge/high-impact-events` |
-| ML | `GET /ml/features/asset/:id` · `GET /ml/training/samples` · `GET /ml/training/samples/:id/lineage` · `GET /ml/historical-reactions` |
-| Admin | `GET /admin/sources` · `GET /admin/ingestion` · `GET /admin/queues` · `GET /admin/data-quality` |
+| News | `GET /news/latest` · `GET /news/assets/:id` · `GET /news/events/:id` · `GET /news/regime` · `GET /news/search` |
+| AlphaForge | `GET /alphaforge/news-context/:instrument` · `GET /alphaforge/high-impact-events` |
+| ML | `GET /ml/features/asset/:id` · `GET /ml/training/samples` · `GET /ml/training/samples/:id/lineage` |
+| Admin | `GET /admin/sources` · `GET /admin/ingestion` · `GET /admin/data-quality` |
+| Phase 3A | `POST /admin/test/pipeline` · `GET /admin/lineage/:articleId` |
 | Health | `GET /health` · `GET /ready` · `GET /metrics` |
 
-See the full [API Reference](API.md) for request parameters, response shapes, and curl examples.
+See `API.md` for the full reference.
 
 ---
 
 ## Key Design Principles
 
-1. **Not a scraper — a Market Intelligence Platform.** Raw news is the input. The product is structured, calibrated, evidence-backed intelligence. A scraper fetches text; SentinelPulse produces `news_impact_score`, `surprise_score`, `FeatureVector`, and `TrainingSample`.
-
-2. **Evidence-backed, not assumption-based.** Cross-market relationships (e.g., CRUDE→AVIATION, USD→NIFTY) are derived from rolling empirical correlation data, not hardcoded rules. The `MarketRegimeEngine` updates the regime from observed market breadth, not from calendar heuristics.
-
-3. **No look-ahead bias, ever.** The `LookAheadGuard` validates every feature computation at runtime and throws `LookAheadBiasError` with full diagnostic context if any data source — price data, volume, sentiment history — carries a timestamp after the event's `event_timestamp`. This check also runs in CI.
-
-4. **News is one factor, not a trading signal.** SentinelPulse never produces BUY, SELL, or HOLD recommendations. It produces `news_impact_score` as one input to AlphaForge's multi-factor model. The distinction is architectural: AlphaForge decides what to do with the signal; SentinelPulse decides what the news means.
-
-5. **Full traceability.** Every `TrainingSample` links to its `FeatureVector`, which links to its `NewsEvent`, which links to its `NormalizedArticle`, which links to its raw source. No ML artifact exists without a complete provenance chain.
-
-6. **Source isolation.** A failing source (HTTP timeout, auth failure, malformed feed) cannot stall or corrupt the pipeline. Each adapter is wrapped in a `CircuitBreaker` (CLOSED → OPEN → HALF_OPEN state machine) and a per-source `RateLimiter`. Failed jobs go to the DLQ. Healthy sources continue uninterrupted.
+1. **Not a scraper.** Raw news is input. The product is structured, calibrated intelligence.
+2. **No look-ahead bias, ever.** `LookAheadGuard` validates every feature at runtime and in CI.
+3. **News is one factor, not a trading signal.** SentinelPulse never produces BUY/SELL/HOLD.
+4. **Full traceability.** Every TrainingSample links back to its raw article.
+5. **Source isolation.** One failing source cannot stall the pipeline.
+6. **Content depth matters.** Reuters (HEADLINE_ONLY, quality 0.25) vs ET (SUMMARY, quality 0.5) — source confidence is weighted accordingly.
 
 ---
 
@@ -316,29 +555,22 @@ See the full [API Reference](API.md) for request parameters, response shapes, an
 
 | Document | Description |
 |---|---|
-| [API.md](API.md) | Comprehensive REST API reference — all endpoints, parameters, response shapes, curl examples |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Component diagram, worker/queue topology, engine dependency graph |
-| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | All 23 database tables with column-level documentation |
-| [docs/ML_FEATURES.md](docs/ML_FEATURES.md) | FeatureVector schema with formulas for all 7 feature groups |
-| [docs/ALPHAFORGE_INTEGRATION.md](docs/ALPHAFORGE_INTEGRATION.md) | Integration contract: request/response shapes, SLA, versioning policy |
-| [docs/SOURCE_ADAPTERS.md](docs/SOURCE_ADAPTERS.md) | Feed URLs, authentication, rate limits, and parser notes for all 6 sources |
-| [docs/BACKFILL.md](docs/BACKFILL.md) | Historical data backfill guide, date range limits, rate limiting behaviour |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Complete env var reference, horizontal scaling guide, cron schedules, data retention |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Failure runbooks for common incidents (DLQ overflow, circuit open, DB lag, look-ahead violations) |
-
----
-
-## Contributing
-
-- TypeScript strict mode — no `any` without an inline justification comment.
-- All engines must have property-based tests covering their correctness properties (see [docs/ML_FEATURES.md](docs/ML_FEATURES.md) for the defined properties list).
-- The look-ahead bias CI check must pass on every PR. No exceptions.
-- Coverage must remain ≥ 80% per engine directory.
-- New source adapters require a corresponding entry in [docs/SOURCE_ADAPTERS.md](docs/SOURCE_ADAPTERS.md) including feed URL, polling interval, rate limits, and authentication method.
-- Bump `FEATURE_VERSION` (MINOR) when any `FeatureVector` field changes. Bump `PIPELINE_VERSION` (MINOR) when any engine logic changes that affects output values.
+| `API.md` | REST API reference — all endpoints, parameters, curl examples |
+| `docs/ARCHITECTURE.md` | Component diagram, worker/queue topology, data flow |
+| `docs/DATA_MODEL.md` | All 23 DB tables with column documentation |
+| `docs/ML_FEATURES.md` | FeatureVector schema, 7 feature groups, formulas |
+| `docs/OPERATIONS.md` | Env var reference, scaling guide, cron schedules, retention |
+| `docs/BACKFILL.md` | Historical data backfill guide |
+| `docs/ALPHAFORGE_SENTINELPULSE_CONTRACT.md` | Phase 3A — definitive integration contract |
+| `docs/SENTINELPULSE_ML_FEATURE_CONTRACT.md` | Phase 3A — ML feature contract v1.0.0 |
+| `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` | Phase 3A — full certification report |
+| `docs/PHASE3A_SMOKE_TEST.md` | Phase 3A — smoke test results |
+| `docs/PHASE3A_PIPELINE_METRICS.md` | Phase 3A — stage dropoff metrics |
+| `docs/PHASE3A_IMPLEMENTATION_MATRIX.md` | Phase 3A — component classification |
+| `docs/TROUBLESHOOTING.md` | Failure runbooks |
 
 ---
 
 ## License
 
-Proprietary — AlphaForge internal use only. Unauthorized distribution or use outside the AlphaForge platform is prohibited.
+Proprietary — AlphaForge internal use only.
