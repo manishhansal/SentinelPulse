@@ -60,6 +60,98 @@ const QUEUE_PUBLISH_MAX_RETRIES = 3;
 const QUEUE_PUBLISH_RETRY_DELAY_MS = 5_000;
 
 // ---------------------------------------------------------------------------
+// Content depth classification
+//
+// Determines how much substance the article body actually carries.
+// Reuters via Google News RSS returns snippet-length summaries only;
+// assigning full-content confidence to these would misrepresent data quality.
+// ---------------------------------------------------------------------------
+
+/**
+ * Depth of available article content.
+ *
+ *   FULL_ARTICLE   — full article body (≥ 500 words after stripping)
+ *   SUMMARY        — multi-sentence abstract (100–499 words)
+ *   HEADLINE_ONLY  — title plus at most a one-sentence snippet (< 100 words)
+ */
+export type ContentDepth = 'FULL_ARTICLE' | 'SUMMARY' | 'HEADLINE_ONLY';
+
+/**
+ * Word-count thresholds for content depth classification.
+ * Calibrated empirically against live RSS feed samples (Phase 2):
+ *   Reuters Google News: 15–35 words → HEADLINE_ONLY
+ *   Moneycontrol RSS:    80–200 words → SUMMARY
+ *   Economic Times RSS:  50–400 words → SUMMARY / FULL_ARTICLE
+ *   CoinDesk RSS:        50–250 words → SUMMARY
+ */
+const FULL_ARTICLE_WORD_THRESHOLD = 500;
+const SUMMARY_WORD_THRESHOLD = 100;
+
+/** Per-source content-depth overrides for known summary-only adapters. */
+const SOURCE_DEPTH_OVERRIDES: Record<string, ContentDepth> = {
+  // Reuters articles arrive via Google News RSS which provides only
+  // the title + one-sentence snippet regardless of article length.
+  reuters: 'HEADLINE_ONLY',
+};
+
+/**
+ * Classifies the content depth of an article.
+ *
+ * Priority:
+ *   1. Explicit per-source override (always authoritative).
+ *   2. Word-count heuristic on the combined title + content text.
+ */
+function classifyContentDepth(
+  sourceId: string,
+  title: string,
+  content: string | null,
+): ContentDepth {
+  // 1. Source-level override
+  const override = SOURCE_DEPTH_OVERRIDES[sourceId];
+  if (override) return override;
+
+  // 2. Word-count heuristic
+  const text = [title, content].filter(Boolean).join(' ');
+  const wordCount = text.trim().split(/\s+/).filter((w) => w.length > 0).length;
+
+  if (wordCount >= FULL_ARTICLE_WORD_THRESHOLD) return 'FULL_ARTICLE';
+  if (wordCount >= SUMMARY_WORD_THRESHOLD) return 'SUMMARY';
+  return 'HEADLINE_ONLY';
+}
+
+/**
+ * Computes a content quality score in [0, 1].
+ *
+ * The score reflects how much raw information is available for downstream
+ * sentiment/entity/event extraction.  It incorporates:
+ *   - content_depth weight
+ *   - whether the timestamp was inferred (reduces confidence)
+ *   - whether content was truncated (minor penalty)
+ *
+ * This score is stored in news_articles.content_quality_score and used by
+ * the source-confidence calculation in ImportanceEngine.
+ */
+function computeContentQualityScore(
+  depth: ContentDepth,
+  timestampInferred: boolean,
+  contentTruncated: boolean,
+): number {
+  const depthScore: Record<ContentDepth, number> = {
+    FULL_ARTICLE: 1.0,
+    SUMMARY: 0.65,
+    HEADLINE_ONLY: 0.25,
+  };
+
+  let score = depthScore[depth];
+
+  // Penalties
+  if (timestampInferred) score -= 0.10;
+  if (contentTruncated) score -= 0.05;
+
+  return Math.max(0, Math.min(1, score));
+}
+
+// ---------------------------------------------------------------------------
 // Taxonomy keyword map (Req 7.1)
 //
 // Maps each taxonomy category to an array of case-insensitive keyword strings.
@@ -344,6 +436,17 @@ export class NormalizationEngine {
       }
 
       // ------------------------------------------------------------------
+      // Step 6b: Content depth + quality score (Phase 3A)
+      // Classify based on per-source override and word-count heuristic.
+      // ------------------------------------------------------------------
+      const contentDepth = classifyContentDepth(raw.sourceId, raw.title, content);
+      const contentQualityScore = computeContentQualityScore(
+        contentDepth,
+        timestampInferred,
+        contentTruncated,
+      );
+
+      // ------------------------------------------------------------------
       // Build the NormalizedArticle (Req 3.1)
       // All optional fields absent from raw MUST be null, never undefined.
       // ------------------------------------------------------------------
@@ -368,6 +471,8 @@ export class NormalizationEngine {
         titleHash,
         contentTruncated,
         timestampInferred,
+        contentDepth,
+        contentQualityScore,
       };
 
       // ------------------------------------------------------------------
@@ -478,6 +583,8 @@ export class NormalizationEngine {
         titleHash: article.titleHash,
         contentTruncated: article.contentTruncated,
         timestampInferred: article.timestampInferred,
+        contentDepth: article.contentDepth,
+        contentQualityScore: article.contentQualityScore,
       },
       update: {
         canonicalUrl: article.canonicalUrl,
@@ -494,6 +601,8 @@ export class NormalizationEngine {
         titleHash: article.titleHash,
         contentTruncated: article.contentTruncated,
         timestampInferred: article.timestampInferred,
+        contentDepth: article.contentDepth,
+        contentQualityScore: article.contentQualityScore,
       },
     });
   }

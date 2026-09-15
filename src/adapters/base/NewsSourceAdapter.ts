@@ -153,6 +153,16 @@ export interface NormalizedArticle {
   contentTruncated: boolean;
   /** True when publishedAt was inferred rather than parsed from source data. */
   timestampInferred: boolean;
+  /**
+   * Depth of the article content: FULL_ARTICLE | SUMMARY | HEADLINE_ONLY.
+   * Reuters via Google News RSS is always HEADLINE_ONLY regardless of word count.
+   */
+  contentDepth: 'FULL_ARTICLE' | 'SUMMARY' | 'HEADLINE_ONLY';
+  /**
+   * Quality score in [0, 1] combining content_depth, timestamp confidence,
+   * and truncation state. Used by ImportanceEngine to weight source confidence.
+   */
+  contentQualityScore: number;
 }
 
 // ---------------------------------------------------------------------------

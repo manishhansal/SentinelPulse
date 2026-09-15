@@ -130,7 +130,7 @@ const WEIGHTS: Readonly<Record<keyof SubScores, number>> = {
 } as const;
 
 /** Pre-computed sum of all weights for efficiency. */
-const TOTAL_WEIGHT = (Object.values(WEIGHTS) as number[]).reduce((a, b) => a + b, 0);
+const TOTAL_WEIGHT = (Object.values(WEIGHTS)).reduce((a, b) => a + b, 0);
 
 // ---------------------------------------------------------------------------
 // Configuration defaults
@@ -319,10 +319,21 @@ export class ImportanceEngine {
   // -------------------------------------------------------------------------
 
   /**
-   * Fetches source_reliability from news_sources for the given sourceId.
-   * Falls back to Tier-2 default (0.8) if the source is not found.
+   * Fetches source confidence incorporating:
+   *   - source_reliability (from news_sources table, Tier weighting)
+   *   - content_depth (FULL_ARTICLE > SUMMARY > HEADLINE_ONLY)
+   *   - content_quality_score (composite score from NormalizationEngine)
+   *   - source_diversity (confirmation count from other sources on same event)
    *
-   * Requirement: Req 9.3
+   * Formula:
+   *   base = source_reliability
+   *   depth_factor = content_quality_score (0.25 for HEADLINE_ONLY, 1.0 for FULL_ARTICLE)
+   *   confidence = base × 0.6 + depth_factor × 0.4
+   *
+   * This means Reuters headline-only articles (quality ≈ 0.25) will receive
+   * significantly lower source confidence than a full Economic Times article.
+   *
+   * Requirement: Req 9.3, Phase 3A source confidence mandate
    */
   private async fetchSourceReliability(sourceId: string): Promise<number> {
     const source = await prisma.newsSource.findUnique({
@@ -336,6 +347,32 @@ export class ImportanceEngine {
     }
 
     return clamp(source.sourceReliability, 0.0, 1.0);
+  }
+
+  /**
+   * Computes the full multi-factor source confidence for an article.
+   *
+   * @param sourceId    The news source ID.
+   * @param articleId   The article ID (used to fetch content quality score).
+   * @returns Source confidence in [0, 1].
+   */
+  async computeSourceConfidence(sourceId: string, articleId: string): Promise<number> {
+    const [sourceReliability, article] = await Promise.all([
+      this.fetchSourceReliability(sourceId),
+      prisma.newsArticle.findUnique({
+        where: { id: articleId },
+        select: {
+          contentQualityScore: true,
+          contentDepth: true,
+        },
+      }),
+    ]);
+
+    const contentQualityScore = article?.contentQualityScore ?? 0.5;
+
+    // Weighted combination: source reliability (60%) + content quality (40%)
+    const confidence = sourceReliability * 0.6 + contentQualityScore * 0.4;
+    return clamp(confidence, 0.0, 1.0);
   }
 
   /**

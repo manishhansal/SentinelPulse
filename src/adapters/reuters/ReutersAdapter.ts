@@ -57,9 +57,9 @@ const logger = pino({ name: 'reuters-adapter' });
 // Constants
 // ---------------------------------------------------------------------------
 
-const REUTERS_SOURCE_ID = 'reuters' as const;
-const REUTERS_SOURCE_NAME = 'Reuters' as const;
-const ADAPTER_VERSION = '1.0.0' as const;
+const REUTERS_SOURCE_ID = 'reuters';
+const REUTERS_SOURCE_NAME = 'Reuters';
+const ADAPTER_VERSION = '1.0.0';
 
 /**
  * Default RSS feed URL (Google News RSS for Reuters).
@@ -96,7 +96,7 @@ export class ReutersAdapter extends AbstractNewsSourceAdapter {
   readonly sourceId = REUTERS_SOURCE_ID;
   readonly sourceName = REUTERS_SOURCE_NAME;
   readonly adapterVersion = ADAPTER_VERSION;
-  readonly tier = 1 as const;
+  readonly tier = 1;
 
   // ------------------------------------------------------------------
   // Configuration
@@ -357,6 +357,8 @@ export class ReutersAdapter extends AbstractNewsSourceAdapter {
       titleHash,
       contentTruncated,
       timestampInferred,
+      contentDepth: 'HEADLINE_ONLY' as const,
+      contentQualityScore: 0.25,
     };
   }
 

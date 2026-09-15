@@ -13,6 +13,7 @@
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -69,6 +70,10 @@ model NewsArticle {
   titleHash          String   @unique @map("title_hash") // SHA-256 hex, 64 chars
   contentTruncated   Boolean  @default(false) @map("content_truncated")
   timestampInferred  Boolean  @default(false) @map("timestamp_inferred")
+  // FULL_ARTICLE | SUMMARY | HEADLINE_ONLY — actual content depth available
+  contentDepth       String   @default("SUMMARY") @map("content_depth")
+  // Quality score [0,1] combining depth, timestamp confidence, truncation
+  contentQualityScore Float   @default(0.5) @map("content_quality_score")
   duplicateCount     Int      @default(0) @map("duplicate_count")
   clusterId          String?  @map("cluster_id") @db.Uuid
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
