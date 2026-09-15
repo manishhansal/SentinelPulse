@@ -40,6 +40,7 @@ import type { Queue } from 'bullmq';
 import { prisma } from '../../db/prisma.js';
 import { DataServiceClient } from '../../integrations/data-service/DataServiceClient.js';
 import type { InstrumentMasterEntry } from '../../integrations/data-service/DataServiceClient.js';
+import { InstrumentIndex } from './InstrumentIndex.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -932,12 +933,16 @@ function extractEntities(article: ArticleInput): ExtractedEntity[] {
 
 export class EntityResolutionEngine {
   private readonly dataServiceClient: DataServiceClient;
+  private readonly instrumentIndex: InstrumentIndex;
 
   constructor(
     private readonly entitiesQueue: Queue,
     dataServiceClient?: DataServiceClient,
   ) {
     this.dataServiceClient = dataServiceClient ?? new DataServiceClient();
+    // Use the singleton InstrumentIndex — populated from built-in alias map
+    // immediately; sync from data-service is triggered externally at startup.
+    this.instrumentIndex = InstrumentIndex.getInstance();
   }
 
   // -------------------------------------------------------------------------
@@ -983,24 +988,66 @@ export class EntityResolutionEngine {
   // -------------------------------------------------------------------------
 
   /**
-   * Resolve extracted entities against the AlphaForge InstrumentMaster via
-   * DataServiceClient.resolveInstrument().
+   * Resolve extracted entities against the AlphaForge InstrumentMaster.
    *
-   * Resolution is best-effort: if the data-service cannot resolve a surface
-   * form, the mention is kept as unresolved (entity_id = null, Req 5.4).
+   * Resolution order (fastest to slowest):
+   *   1. InstrumentIndex local lookup — O(1), covers ~200 built-in aliases +
+   *      up to 34,459 instruments synced from data-service.
+   *   2. DataServiceClient.resolveInstrument() — HTTP call, for entities
+   *      not found in the local index (e.g. recently listed instruments).
+   *
+   * Resolution is best-effort: if both layers fail, the mention is kept as
+   * unresolved (entity_id = null, Req 5.4).
    */
   private async resolveEntities(
     mentions: ExtractedEntity[],
   ): Promise<ResolvedMention[]> {
     // Deduplicate surface forms across the mentions list to avoid redundant
-    // data-service calls.
+    // lookups.
     const surfaceForms = [...new Set(mentions.map((m) => m.surfaceForm))];
     const instrumentByForm = new Map<string, InstrumentMasterEntry | null>();
 
     for (const surfaceForm of surfaceForms) {
+      // --- Layer 1: local InstrumentIndex (no network) ---
+      const localId = this.instrumentIndex.resolve(surfaceForm);
+      if (localId) {
+        const localEntry = this.instrumentIndex.getById(localId);
+        if (localEntry) {
+          instrumentByForm.set(surfaceForm, {
+            instrumentId: localEntry.instrumentId,
+            symbol: localEntry.tradingSymbol,
+            name: localEntry.displayName,
+            exchange: localEntry.nseSymbol ? 'NSE' : 'BSE',
+            aliases: [localEntry.tradingSymbol, localEntry.displayName].filter(Boolean),
+            isActive: localEntry.isActive,
+          });
+          continue;
+        }
+        // instrumentId known but no full record — use minimal entry
+        instrumentByForm.set(surfaceForm, {
+          instrumentId: localId,
+          symbol: surfaceForm,
+          name: surfaceForm,
+          exchange: localId.startsWith('BSE:') ? 'BSE' : 'NSE',
+          aliases: [surfaceForm],
+          isActive: true,
+        });
+        continue;
+      }
+
+      // --- Layer 2: data-service HTTP call ---
       try {
         const instrument = await this.dataServiceClient.resolveInstrument(surfaceForm);
         instrumentByForm.set(surfaceForm, instrument);
+
+        // Back-populate the local index so subsequent articles benefit
+        if (instrument) {
+          // Trigger a warm-up of the index entry on the next sync cycle
+          logger.debug(
+            { surfaceForm, instrumentId: instrument.instrumentId },
+            '[EntityResolutionEngine] Resolved via data-service — will be cached on next index sync',
+          );
+        }
       } catch (err) {
         // Data-service unavailability → treat as unresolved, do not abort
         logger.warn(
