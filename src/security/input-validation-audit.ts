@@ -35,8 +35,8 @@
  *   - No raw input values are included in any error response shape.
  */
 
-export const INPUT_VALIDATION_AUDIT_VERSION = '1.0.0' as const;
-export const AUDIT_DATE = '2025-01-15' as const;
+export const INPUT_VALIDATION_AUDIT_VERSION = '1.0.0';
+export const AUDIT_DATE = '2025-01-15';
 
 /** Configuration details confirmed in src/app.ts (Req 30.2, Req 25.7). */
 export const VALIDATION_CONFIG = {

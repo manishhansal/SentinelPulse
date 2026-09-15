@@ -35,8 +35,8 @@
  * Audit result: PASS — all three outbound HTTP call-sites are protected.
  */
 
-export const SSRF_AUDIT_VERSION = '1.0.0' as const;
-export const AUDIT_DATE = '2025-01-15' as const;
+export const SSRF_AUDIT_VERSION = '1.0.0';
+export const AUDIT_DATE = '2025-01-15';
 
 /**
  * Files confirmed to have SSRF guard integration.
