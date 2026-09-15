@@ -85,7 +85,6 @@ model NewsArticle {
   articleEventLinks NewsArticleEventLink[]
   sentiment         NewsSentiment[]
   marketImpacts     NewsMarketImpact[]
-  trainingFeatures  NewsFeature[]
 
   @@unique([sourceId, externalId])
   @@index([publishedAt(sort: Desc)])
@@ -449,7 +448,8 @@ model NewsFeature {
 
   // Relations
   event           NewsEvent?           @relation(fields: [eventId], references: [id])
-  article         NewsArticle?         @relation(fields: [entityId], references: [id], map: "news_features_article_entity_fkey")
+  // NOTE: entity_id is TEXT (not UUID) so it cannot be a typed Prisma relation
+  // to NewsArticle (which has UUID PK). Application-layer enforcement only.
   trainingSamples NewsTrainingSample[]
 
   @@unique([eventId, assetId, featureVersion])

@@ -444,11 +444,9 @@ CREATE TABLE "news_features" (
     CONSTRAINT "news_features_event_id_asset_id_feature_version_key"
         UNIQUE ("event_id", "asset_id", "feature_version"),
     CONSTRAINT "news_features_event_id_fkey"
-        FOREIGN KEY ("event_id") REFERENCES "news_events"("id"),
-    -- Logical FK: entity_id may refer to a news_articles.id when entity_type = 'article'
-    CONSTRAINT "news_features_article_entity_fkey"
-        FOREIGN KEY ("entity_id") REFERENCES "news_articles"("id")
-        DEFERRABLE INITIALLY DEFERRED
+        FOREIGN KEY ("event_id") REFERENCES "news_events"("id")
+    -- entity_id is TEXT; no DB-level FK to news_articles (UUID PK incompatible).
+    -- Article linkage is enforced at the application layer only.
 );
 
 CREATE INDEX "news_features_event_id_idx"
