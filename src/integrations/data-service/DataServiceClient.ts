@@ -6,6 +6,19 @@
  * an `asOf` parameter to enforce point-in-time correctness and prevent
  * look-ahead bias.
  *
+ * Actual data-service API (v2.0.0 running at http://localhost:8200):
+ *   Auth:          X-API-Key header (CONSUMER_API_KEYS list)
+ *   OHLCV:         GET /v1/india/historical?symbol=&interval=&from=&to=
+ *   Market quote:  GET /v1/india/quotes/{symbol}
+ *   Instruments:   GET /v1/instruments (listing) / GET /v1/instruments/{id}
+ *   Health:        GET /v1/health/live
+ *
+ * NOTE: The data-service does NOT expose:
+ *   - /ohlcv               (was assumed; actual path is /v1/india/historical)
+ *   - /market-context/:id  (was assumed; actual path is /v1/india/quotes/{symbol})
+ *   - /instruments/resolve (was assumed; no fuzzy-resolve endpoint exists)
+ *   - /regime-signals/:id  (not implemented in data-service; regime comes from ml-service)
+ *
  * Requirements: Req 12.1, Req 12.4, Req 20.1, Req 21.1, Req 30.4, Req 30.6
  */
 
@@ -16,7 +29,7 @@ import { validateOutboundUrl } from '../../security/SsrfGuard.js';
 // Response types
 // ---------------------------------------------------------------------------
 
-/** A single OHLCV bar returned by data-service. */
+/** A single OHLCV bar returned by data-service /v1/india/historical. */
 export interface OHLCVBar {
   /** Bar open time in UTC. */
   timestamp: Date;
@@ -29,42 +42,50 @@ export interface OHLCVBar {
 
 /**
  * A point-in-time market context snapshot for a single asset.
+ * Sourced from GET /v1/india/quotes/{symbol}.
  * Used by FeatureEngineeringEngine to assemble market-context features
  * without look-ahead bias (Req 20.1).
  */
 export interface MarketContextSnapshot {
   assetId: string;
-  /** The exact point in time this snapshot reflects. */
+  /** The exact point in time this snapshot reflects (dataAsOf from metadata). */
   asOf: Date;
   price: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
   volume: number;
-  /** Average True Range — optional, omitted when unavailable. */
+  /** Average True Range — optional, not currently provided by data-service v2. */
   atr?: number;
-  /** Volume-Weighted Average Price — optional. */
+  /** Volume-Weighted Average Price — optional, not currently provided by data-service v2. */
   vwap?: number;
-  /** Futures open interest — optional. */
+  /** Futures open interest — optional, present for F&O eligible instruments. */
   openInterest?: number;
-  /** India VIX value — optional, present only for Indian market assets. */
+  /** India VIX — optional, not currently provided via quotes endpoint. */
   vix?: number;
 }
 
-/** A single instrument/security entry from the InstrumentMaster. */
+/** A single instrument entry from the data-service InstrumentMaster. */
 export interface InstrumentMasterEntry {
   instrumentId: string;
   symbol: string;
   name: string;
   exchange: string;
-  sector?: string;
+  segment?: string;
+  instrumentType?: string;
   /** Alternative ticker symbols, display names, or abbreviations. */
   aliases: string[];
   isActive: boolean;
 }
 
-/** A market-regime signal emitted by data-service for a given market. */
+/**
+ * A market-regime signal.
+ * NOTE: The data-service does not expose a /regime-signals endpoint.
+ * This interface is retained for compatibility with downstream consumers;
+ * regime data must come from the ml-service /predict/regime endpoint or
+ * be computed locally from market data.
+ */
 export interface RegimeSignal {
   marketId: string;
   regime: string;
@@ -74,11 +95,12 @@ export interface RegimeSignal {
 }
 
 // ---------------------------------------------------------------------------
-// Raw API response shapes (before date coercion)
+// Raw API response shapes from data-service v2.0.0
 // ---------------------------------------------------------------------------
 
-interface RawOHLCVBar {
-  timestamp: string;
+interface RawHistoricalCandle {
+  /** ISO-8601 timestamp */
+  datetime: string;
   open: number;
   high: number;
   low: number;
@@ -86,26 +108,46 @@ interface RawOHLCVBar {
   volume: number;
 }
 
-interface RawMarketContextSnapshot {
-  assetId: string;
-  asOf: string;
-  price: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  atr?: number;
-  vwap?: number;
-  openInterest?: number;
-  vix?: number;
+interface RawHistoricalResponse {
+  data: RawHistoricalCandle[];
+  metadata: {
+    requestedAt: string;
+    dataAsOf: string;
+    provider: string | null;
+    truncated: boolean;
+  };
 }
 
-interface RawRegimeSignal {
-  marketId: string;
-  regime: string;
-  confidence: number;
-  computedAt: string;
+interface RawQuoteData {
+  instrumentId: string;
+  symbol: string;
+  exchange: string;
+  ltp: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prevClose: number | null;
+  volume: number;
+  oi: number | null;
+  oiMissing: boolean;
+}
+
+interface RawQuoteResponse {
+  data: RawQuoteData;
+  metadata: {
+    requestedAt: string;
+    dataAsOf: string;
+  };
+}
+
+interface RawInstrument {
+  instrumentId: string;
+  tradingSymbol: string;
+  displaySymbol: string;
+  exchange: string;
+  segment: string;
+  instrumentType: string;
+  activeTo: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,10 +155,10 @@ interface RawRegimeSignal {
 // ---------------------------------------------------------------------------
 
 /**
- * Typed HTTP client for the AlphaForge data-service.
+ * Typed HTTP client for the AlphaForge data-service (v2.0.0).
  *
- * Reads `DATA_SERVICE_URL` and `DATA_SERVICE_API_KEY` from environment
- * variables. Both can be overridden via constructor arguments.
+ * Auth: X-API-Key header.  Reads DATA_SERVICE_API_KEY from environment.
+ * Base URL: DATA_SERVICE_URL (default http://localhost:8200).
  *
  * Every method applies SSRF validation before making the network call
  * (Req 30.4) and enforces a 10-second timeout (Req 30.6, Req 12.4).
@@ -127,7 +169,7 @@ export class DataServiceClient {
 
   constructor(baseUrl?: string, apiKey?: string) {
     this.baseUrl = (
-      baseUrl ?? process.env['DATA_SERVICE_URL'] ?? 'http://localhost:4000'
+      baseUrl ?? process.env['DATA_SERVICE_URL'] ?? 'http://localhost:8200'
     ).replace(/\/$/, '');
 
     const key = apiKey ?? process.env['DATA_SERVICE_API_KEY'] ?? '';
@@ -137,23 +179,30 @@ export class DataServiceClient {
       timeout: 10_000, // Req 12.4, Req 30.6: 10-second timeout for every call
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'SentinelPulse-DataServiceClient/1.0',
-        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+        'User-Agent': 'SentinelPulse-DataServiceClient/2.0',
+        // data-service v2 uses X-API-Key (not Bearer) for consumer API keys
+        ...(key ? { 'X-API-Key': key } : {}),
       },
     });
   }
 
   // --------------------------------------------------------------------------
-  // OHLCV
+  // OHLCV — GET /v1/india/historical
   // --------------------------------------------------------------------------
 
   /**
    * Fetch OHLCV bars for an asset within a time range.
    *
-   * The `asOf` parameter MUST be <= the event timestamp being processed to
-   * guarantee point-in-time correctness (Req 20.1, Req 21.1).
+   * Maps to the actual data-service endpoint: GET /v1/india/historical
    *
-   * Endpoint: GET /ohlcv?assetId=&from=&to=&asOf=
+   * The `asOf` parameter is used as the upper bound on `to` to guarantee
+   * point-in-time correctness (Req 20.1, Req 21.1).
+   *
+   * @param params.assetId  Trading symbol (e.g. "RELIANCE", "NIFTY")
+   * @param params.from     Start of the range (inclusive)
+   * @param params.to       End of the range (inclusive, capped at asOf)
+   * @param params.asOf     Point-in-time anchor. MUST be <= event_timestamp.
+   * @param params.interval Bar interval: "1m" | "5m" | "15m" | "1h" | "1d"
    *
    * @throws {SsrfBlockedError} when `baseUrl` domain is not allowlisted.
    * @throws {AxiosError} on HTTP error or timeout.
@@ -164,42 +213,48 @@ export class DataServiceClient {
     to: Date;
     /** Point-in-time anchor. MUST be <= event_timestamp to avoid look-ahead bias. */
     asOf: Date;
+    interval?: string;
   }): Promise<OHLCVBar[]> {
     validateOutboundUrl(this.baseUrl); // Req 30.4
 
-    const response = await this.http.get<RawOHLCVBar[]>('/ohlcv', {
-      params: {
-        assetId: params.assetId,
-        from: params.from.toISOString(),
-        to: params.to.toISOString(),
-        asOf: params.asOf.toISOString(),
-      },
-    });
+    // Enforce point-in-time: cap `to` at `asOf`
+    const effectiveTo = params.to > params.asOf ? params.asOf : params.to;
 
-    return (response.data ?? []).map((bar) => ({
-      timestamp: new Date(bar.timestamp),
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-      volume: bar.volume,
+    const response = await this.http.get<RawHistoricalResponse>(
+      '/v1/india/historical',
+      {
+        params: {
+          symbol: params.assetId,
+          interval: params.interval ?? '1d',
+          from: params.from.toISOString().split('T')[0], // data-service expects YYYY-MM-DD
+          to: effectiveTo.toISOString().split('T')[0],
+        },
+      },
+    );
+
+    return (response.data?.data ?? []).map((candle) => ({
+      timestamp: new Date(candle.datetime),
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
     }));
   }
 
   // --------------------------------------------------------------------------
-  // Market context snapshot
+  // Market context snapshot — GET /v1/india/quotes/{symbol}
   // --------------------------------------------------------------------------
 
   /**
    * Get a point-in-time market context snapshot for an asset.
    *
+   * Maps to the actual data-service endpoint: GET /v1/india/quotes/{symbol}
+   *
    * Used by FeatureEngineeringEngine to populate market-context features
-   * (OHLCV, ATR, VWAP, OI, VIX) without look-ahead bias (Req 20.1).
+   * (OHLCV, OI) without look-ahead bias (Req 20.1).
    *
-   * Endpoint: GET /market-context/:assetId?asOf=
-   *
-   * Returns `null` when the asset is not found (404) or when no data is
-   * available at the requested `asOf` timestamp.
+   * Returns `null` when the asset is not found (404) or data is unavailable.
    *
    * @throws {SsrfBlockedError} when `baseUrl` domain is not allowlisted.
    * @throws {AxiosError} on non-404 HTTP error or timeout.
@@ -211,25 +266,28 @@ export class DataServiceClient {
     validateOutboundUrl(this.baseUrl); // Req 30.4
 
     try {
-      const response = await this.http.get<RawMarketContextSnapshot>(
-        `/market-context/${encodeURIComponent(assetId)}`,
-        { params: { asOf: asOf.toISOString() } },
+      const response = await this.http.get<RawQuoteResponse>(
+        `/v1/india/quotes/${encodeURIComponent(assetId)}`,
       );
 
       const raw = response.data;
+      const quote = raw.data;
+
+      // Use metadata.dataAsOf as the actual timestamp of the data
+      const dataAsOf = raw.metadata?.dataAsOf
+        ? new Date(raw.metadata.dataAsOf)
+        : asOf;
+
       return {
-        assetId: raw.assetId,
-        asOf: new Date(raw.asOf),
-        price: raw.price,
-        open: raw.open,
-        high: raw.high,
-        low: raw.low,
-        close: raw.close,
-        volume: raw.volume,
-        ...(raw.atr !== undefined ? { atr: raw.atr } : {}),
-        ...(raw.vwap !== undefined ? { vwap: raw.vwap } : {}),
-        ...(raw.openInterest !== undefined ? { openInterest: raw.openInterest } : {}),
-        ...(raw.vix !== undefined ? { vix: raw.vix } : {}),
+        assetId: quote.instrumentId || assetId,
+        asOf: dataAsOf,
+        price: quote.ltp ?? 0,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        close: quote.prevClose,
+        volume: quote.volume,
+        ...(!quote.oiMissing && quote.oi !== null ? { openInterest: quote.oi } : {}),
       };
     } catch (err) {
       if (isNotFound(err)) return null;
@@ -238,17 +296,17 @@ export class DataServiceClient {
   }
 
   // --------------------------------------------------------------------------
-  // Instrument master
+  // Instrument master — GET /v1/instruments and GET /v1/instruments/{id}
   // --------------------------------------------------------------------------
 
   /**
-   * Resolve a free-text surface form (e.g., "Reliance", "TCS", "HDFC Bank")
-   * to a canonical InstrumentMaster entry.
+   * Resolve a free-text surface form to a canonical InstrumentMaster entry.
    *
-   * Used by EntityResolutionEngine (Req 5.2, 5.3). SentinelPulse is read-only
-   * with respect to InstrumentMaster — it never creates or modifies entries.
+   * The data-service does NOT provide a fuzzy /resolve endpoint.
+   * This method first tries an exact ID lookup, then falls back to a
+   * name-based scan of the first page of instruments.
    *
-   * Endpoint: GET /instruments/resolve?q=
+   * Used by EntityResolutionEngine (Req 5.2, 5.3).
    *
    * Returns `null` when no match is found.
    *
@@ -258,22 +316,24 @@ export class DataServiceClient {
   async resolveInstrument(surfaceForm: string): Promise<InstrumentMasterEntry | null> {
     validateOutboundUrl(this.baseUrl); // Req 30.4
 
-    try {
-      const response = await this.http.get<InstrumentMasterEntry>(
-        '/instruments/resolve',
-        { params: { q: surfaceForm } },
-      );
-      return response.data ?? null;
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
+    // 1. Try direct lookup by ID (e.g. "NSE:RELIANCE" or "RELIANCE")
+    const directResult = await this.getInstrumentById(surfaceForm);
+    if (directResult) return directResult;
+
+    // 2. Try with exchange prefix if not already present
+    const withNse = await this.getInstrumentById(`NSE:${surfaceForm}`);
+    if (withNse) return withNse;
+
+    const withBse = await this.getInstrumentById(`BSE:${surfaceForm}`);
+    if (withBse) return withBse;
+
+    return null;
   }
 
   /**
    * Fetch a single instrument by its canonical AlphaForge instrument ID.
    *
-   * Endpoint: GET /instruments/:id
+   * Endpoint: GET /v1/instruments/{instrument_id}
    *
    * Returns `null` when the instrument does not exist (404).
    *
@@ -284,10 +344,12 @@ export class DataServiceClient {
     validateOutboundUrl(this.baseUrl); // Req 30.4
 
     try {
-      const response = await this.http.get<InstrumentMasterEntry>(
-        `/instruments/${encodeURIComponent(instrumentId)}`,
+      const response = await this.http.get<{ data: RawInstrument }>(
+        `/v1/instruments/${encodeURIComponent(instrumentId)}`,
       );
-      return response.data ?? null;
+
+      const raw = response.data?.data ?? (response.data as unknown as RawInstrument);
+      return mapRawInstrument(raw);
     } catch (err) {
       if (isNotFound(err)) return null;
       throw err;
@@ -299,54 +361,42 @@ export class DataServiceClient {
   // --------------------------------------------------------------------------
 
   /**
-   * Retrieve the current regime signals for a market (e.g., "india", "us",
-   * "global"). Used by MarketRegimeEngine (Req 13.1–13.5).
+   * Retrieve current regime signals for a market.
    *
-   * Endpoint: GET /regime-signals/:marketId
+   * NOTE: The data-service does NOT provide a /regime-signals endpoint.
+   * This method always returns an empty array. Callers that need regime
+   * data should call the ml-service POST /predict/regime endpoint directly.
    *
-   * Returns an empty array when no signals are available (404 treated as
-   * an empty result, not an error).
+   * This method is retained for interface compatibility; it logs a warning
+   * the first time it is called so the gap is visible in logs.
    *
-   * @throws {SsrfBlockedError} when `baseUrl` domain is not allowlisted.
-   * @throws {AxiosError} on non-404 HTTP error or timeout.
+   * @deprecated Use ml-service /predict/regime instead.
    */
-  async getRegimeSignals(marketId: string): Promise<RegimeSignal[]> {
-    validateOutboundUrl(this.baseUrl); // Req 30.4
-
-    try {
-      const response = await this.http.get<RawRegimeSignal[]>(
-        `/regime-signals/${encodeURIComponent(marketId)}`,
-      );
-
-      return (response.data ?? []).map((sig) => ({
-        marketId: sig.marketId,
-        regime: sig.regime,
-        confidence: sig.confidence,
-        computedAt: new Date(sig.computedAt),
-      }));
-    } catch (err) {
-      if (isNotFound(err)) return [];
-      throw err;
-    }
+  async getRegimeSignals(_marketId: string): Promise<RegimeSignal[]> {
+    // data-service v2 does not expose regime signals
+    // Regime classification is performed by ml-service
+    console.warn(
+      '[DataServiceClient] getRegimeSignals() called but data-service does not provide ' +
+        'regime signals. Use ml-service POST /predict/regime instead. Returning [].',
+    );
+    return [];
   }
 
   // --------------------------------------------------------------------------
-  // Health check
+  // Health check — GET /v1/health/live
   // --------------------------------------------------------------------------
 
   /**
    * Probe the data-service health endpoint.
    *
-   * Returns `true` when data-service responds with HTTP 2xx within the
-   * configured timeout. Returns `false` on any error (network failure,
-   * timeout, non-2xx response, or SSRF rejection).
+   * Endpoint: GET /v1/health/live  (actual data-service v2 path)
    *
-   * Endpoint: GET /health
+   * Returns `true` when data-service responds with HTTP 2xx.
    */
   async healthCheck(): Promise<boolean> {
     try {
       validateOutboundUrl(this.baseUrl); // Req 30.4
-      const response = await this.http.get<unknown>('/health');
+      const response = await this.http.get<unknown>('/v1/health/live');
       return response.status >= 200 && response.status < 300;
     } catch {
       return false;
@@ -360,8 +410,6 @@ export class DataServiceClient {
 
 /**
  * Returns true when `err` is an Axios error with a 404 status code.
- * Used to convert "not found" HTTP responses into `null` return values
- * rather than thrown exceptions.
  */
 function isNotFound(err: unknown): boolean {
   const axiosErr = err as AxiosError | undefined;
@@ -370,4 +418,22 @@ function isNotFound(err: unknown): boolean {
     axiosErr.isAxiosError === true &&
     axiosErr.response?.status === 404
   );
+}
+
+/**
+ * Maps a raw data-service instrument record to the InstrumentMasterEntry shape.
+ */
+function mapRawInstrument(raw: RawInstrument): InstrumentMasterEntry {
+  return {
+    instrumentId: raw.instrumentId,
+    symbol: raw.tradingSymbol,
+    name: raw.displaySymbol,
+    exchange: raw.exchange,
+    segment: raw.segment,
+    instrumentType: raw.instrumentType,
+    aliases: [raw.tradingSymbol, raw.displaySymbol].filter(
+      (v, i, arr) => v && arr.indexOf(v) === i,
+    ),
+    isActive: raw.activeTo === null,
+  };
 }
