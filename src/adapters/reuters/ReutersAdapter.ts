@@ -1,8 +1,11 @@
 /**
  * ReutersAdapter — Tier-1 RSS-based adapter for Reuters.
  *
- * Reuters provides a public RSS feed that serves as the primary fetch
- * mechanism for this adapter (Req 1.4: prefer official feed over scraping).
+ * Reuters officially discontinued their direct RSS feeds in June 2020
+ * (feeds.reuters.com is now NXDOMAIN). This adapter sources Reuters content
+ * via the Google News RSS search API, which provides a live feed of Reuters
+ * articles in standard RSS 2.0 format under Google's RSS terms of service
+ * (personal/non-commercial feed reader use).
  *
  * The adapter extends AbstractNewsSourceAdapter which provides:
  *   - SSRF allowlist validation on all outbound URLs (Req 30.4)
@@ -12,7 +15,7 @@
  * Configuration (all read from environment variables, Req 1.9):
  *
  *   NEWS_SOURCE_REUTERS_BASE_URL      — RSS feed URL
- *                                       Default: https://feeds.reuters.com/reuters/topNews
+ *                                       Default: https://news.google.com/rss/search?q=site:reuters.com+finance+markets&hl=en-IN&gl=IN&ceid=IN:en
  *   NEWS_SOURCE_REUTERS_RPM           — requests-per-minute limit (optional, default 10)
  *
  * Requirements: Req 1.2, Req 1.4
@@ -58,8 +61,14 @@ const REUTERS_SOURCE_ID = 'reuters' as const;
 const REUTERS_SOURCE_NAME = 'Reuters' as const;
 const ADAPTER_VERSION = '1.0.0' as const;
 
-/** Default RSS feed URL. Overridable via NEWS_SOURCE_REUTERS_BASE_URL. */
-const DEFAULT_FEED_URL = 'https://feeds.reuters.com/reuters/topNews';
+/**
+ * Default RSS feed URL (Google News RSS for Reuters).
+ * Reuters killed direct RSS feeds in June 2020 (feeds.reuters.com = NXDOMAIN).
+ * Google News RSS provides Reuters articles in standard RSS 2.0 format.
+ * Overridable via NEWS_SOURCE_REUTERS_BASE_URL.
+ */
+const DEFAULT_FEED_URL =
+  'https://news.google.com/rss/search?q=site:reuters.com+finance+markets&hl=en-IN&gl=IN&ceid=IN:en';
 
 /** Maximum content length in characters before truncation (Req 3.5). */
 const MAX_CONTENT_LENGTH = 50_000;
@@ -149,7 +158,7 @@ export class ReutersAdapter extends AbstractNewsSourceAdapter {
         // A HEAD request would be lighter but many RSS servers reject it;
         // fetch with a streaming response and abort early instead.
         responseType: 'text',
-        maxContentLength: 4096, // Only need enough to detect a valid response
+        maxContentLength: 200_000, // Google News RSS can be >100KB; set a safe limit
       });
       const latencyMs = Date.now() - start;
       const healthy = res.status >= 200 && res.status < 300;
@@ -157,8 +166,8 @@ export class ReutersAdapter extends AbstractNewsSourceAdapter {
       return {
         healthy,
         message: healthy
-          ? 'Reuters RSS feed is reachable'
-          : `Reuters RSS feed returned HTTP ${res.status}`,
+          ? 'Reuters (via Google News RSS) feed is reachable'
+          : `Reuters (via Google News RSS) feed returned HTTP ${res.status}`,
         checkedAt,
         statusCode: res.status,
         latencyMs,
@@ -173,7 +182,7 @@ export class ReutersAdapter extends AbstractNewsSourceAdapter {
           ? err.message
           : 'Unknown error during Reuters health check';
 
-      logger.warn({ err, sourceId: this.sourceId }, 'Reuters health check failed');
+      logger.warn({ err, sourceId: this.sourceId }, 'Reuters (Google News RSS) health check failed');
 
       return {
         healthy: false,
