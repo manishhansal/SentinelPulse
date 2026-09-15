@@ -35,7 +35,16 @@ export function validateOutboundUrl(url: string): void {
     throw new SsrfBlockedError('(invalid URL)');
   }
 
-  if (!ALLOWED_DOMAINS.has(hostname)) {
+  // Exact match first
+  if (ALLOWED_DOMAINS.has(hostname)) return;
+
+  // Subdomain match: check if any allowlist entry is a parent domain.
+  // e.g. "moneycontrol.com" in allowlist matches "www.moneycontrol.com"
+  const isSubdomainMatch = [...ALLOWED_DOMAINS].some(
+    (allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`),
+  );
+
+  if (!isSubdomainMatch) {
     console.warn(`[SsrfGuard] Blocked outbound request to domain: ${hostname}`);
     throw new SsrfBlockedError(hostname);
   }
