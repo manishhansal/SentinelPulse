@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: sentinel_pulse_test
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://sentinel:test_password@localhost:5432/sentinel_pulse_test
+      REDIS_URL: redis://localhost:6379
+      SENTINEL_API_KEY: test-ci-key
+      DATA_SERVICE_URL: http://localhost:4000
+      DATA_SERVICE_API_KEY: test-data-key
+      SCRAPLING_URL: http://localhost:8001
+      FEATURE_VERSION: 1.0.0
+      PIPELINE_VERSION: 1.0.0
+      NODE_ENV: test
+      LOG_LEVEL: warn
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sentinel-pulse/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: sentinel-pulse
+
+      - name: TypeScript compilation check
+        run: npx tsc --noEmit
+        working-directory: sentinel-pulse
+
+      - name: Run Prisma migrations
+        run: npx prisma migrate deploy
+        working-directory: sentinel-pulse
+
+      - name: Run tests with coverage
+        run: npx vitest run --coverage
+        working-directory: sentinel-pulse
+
+      - name: Look-ahead leakage CI check (Req 31.4)
+        run: npx tsx tests/ci/look-ahead-check.ts
+        working-directory: sentinel-pulse
+        # Fail the build if look-ahead violations are found (no continue-on-error)
+
+      - name: Verify documentation files exist (Req 34.1)
+        run: |
+          missing=0
+          for doc in README.md ARCHITECTURE.md DATA_MODEL.md API.md \
+                     SOURCE_ADAPTERS.md ML_FEATURES.md \
+                     ALPHAFORGE_INTEGRATION.md BACKFILL.md \
+                     OPERATIONS.md TROUBLESHOOTING.md; do
+            if [ ! -f "docs/$doc" ]; then
+              echo "ERROR: Missing documentation file: docs/$doc"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "One or more required documentation files are missing."
+            exit 1
+          fi
+          echo "All required documentation files are present."
+        working-directory: sentinel-pulse
