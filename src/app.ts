@@ -231,9 +231,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Correlation ID propagation (Req 29.2)
   // ─────────────────────────────────────────────────────────────────────────
 
-  app.addHook('onRequest', async (request) => {
+  app.addHook('onRequest', (request, _reply, done) => {
     // Carry the Fastify-generated request ID through all log entries
     request.log = request.log.child({ correlationId: request.id });
+    done();
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -320,7 +321,7 @@ export async function buildApp(): Promise<FastifyInstance> {
         },
       },
     },
-  }, async () => ({
+  }, () => ({
     status: 'alive',
     timestamp: new Date().toISOString(),
   }));
@@ -392,17 +393,17 @@ export async function buildApp(): Promise<FastifyInstance> {
     }),
   );
 
-  app.post('/api/v1/admin/backfill/:jobId/pause', async () => ({
+  app.post('/api/v1/admin/backfill/:jobId/pause', () => ({
     success: true,
     meta: { timestamp: new Date().toISOString() },
   }));
 
-  app.post('/api/v1/admin/backfill/:jobId/resume', async () => ({
+  app.post('/api/v1/admin/backfill/:jobId/resume', () => ({
     success: true,
     meta: { timestamp: new Date().toISOString() },
   }));
 
-  app.post('/api/v1/admin/backfill/:jobId/cancel', async () => ({
+  app.post('/api/v1/admin/backfill/:jobId/cancel', () => ({
     success: true,
     meta: { timestamp: new Date().toISOString() },
   }));

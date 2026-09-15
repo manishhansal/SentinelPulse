@@ -22,6 +22,7 @@ import { Redis } from 'ioredis';
 import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
 import { NormalizationEngine } from '../engines/normalization/NormalizationEngine.js';
+import type { RawArticle } from '../adapters/base/NewsSourceAdapter.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
 
 const logger = pino({ name: 'normalize-worker' });
@@ -38,7 +39,7 @@ const worker = new Worker(
   QUEUE_NAMES.RAW,
   async (job: Job) => {
     try {
-      await engine.process(job.data);
+      await engine.process(job.data as RawArticle);
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');

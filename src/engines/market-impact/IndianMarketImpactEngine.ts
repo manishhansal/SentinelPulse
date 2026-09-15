@@ -132,6 +132,8 @@ const CRUDE_UP_KEYWORDS = ['crude rises', 'crude up', 'oil rises', 'oil up', 'oi
 const CRUDE_DOWN_KEYWORDS = ['crude falls', 'crude down', 'oil falls', 'oil down', 'oil drop', 'oil prices fall', 'brent down', 'wti down', 'crude slips', 'oil slides'];
 const GOLD_KEYWORDS = ['gold', 'bullion', 'precious metal'];
 const GEOPOLITICAL_KEYWORDS = ['war', 'conflict', 'military', 'sanction', 'tension', 'attack', 'invasion', 'geopolitical', 'crisis', 'ceasefire'];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- reserved for future geopolitical scoring
+void GEOPOLITICAL_KEYWORDS;
 
 // Earnings-related company keywords (maps keyword → assetId)
 const EARNINGS_COMPANY_MAP: ReadonlyArray<{ keywords: string[]; assetId: string }> = [

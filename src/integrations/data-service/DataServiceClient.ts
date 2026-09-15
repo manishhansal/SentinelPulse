@@ -372,6 +372,7 @@ export class DataServiceClient {
    *
    * @deprecated Use ml-service /predict/regime instead.
    */
+  // eslint-disable-next-line @typescript-eslint/require-await
   async getRegimeSignals(_marketId: string): Promise<RegimeSignal[]> {
     // data-service v2 does not expose regime signals
     // Regime classification is performed by ml-service
@@ -414,7 +415,8 @@ export class DataServiceClient {
 function isNotFound(err: unknown): boolean {
   const axiosErr = err as AxiosError | undefined;
   return (
-    axiosErr != null &&
+    axiosErr !== null &&
+    axiosErr !== undefined &&
     axiosErr.isAxiosError === true &&
     axiosErr.response?.status === 404
   );

@@ -77,7 +77,7 @@ export class CacheInvalidation {
 
       const assetIds = impacts
         .map((r) => r.assetId)
-        .filter((id): id is string => id !== '' && id != null);
+        .filter((id): id is string => id !== '' && id !== null && id !== undefined);
 
       for (const assetId of assetIds) {
         await this.redis.del(`news:signal:${assetId}`);

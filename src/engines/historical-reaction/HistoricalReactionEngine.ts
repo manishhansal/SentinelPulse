@@ -446,7 +446,7 @@ export class HistoricalReactionEngine {
  */
 function isTimeoutError(err: unknown): boolean {
   const axiosErr = err as AxiosError | null | undefined;
-  if (axiosErr == null || axiosErr.isAxiosError !== true) return false;
+  if (axiosErr === null || axiosErr === undefined || axiosErr.isAxiosError !== true) return false;
   const code = axiosErr.code ?? '';
   const message = axiosErr.message ?? '';
   return (

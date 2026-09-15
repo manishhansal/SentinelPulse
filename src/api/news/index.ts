@@ -54,6 +54,7 @@ function errorEnvelope(
  *
  * Requirements: Req 25.1
  */
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function registerNewsRoutes(app: FastifyInstance): Promise<void> {
   // ─────────────────────────────────────────────────────────────────────────
   // GET /api/v1/news/latest

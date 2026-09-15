@@ -23,6 +23,7 @@ import { pino } from 'pino';
 import { LookAheadBiasError } from '../engines/feature-engineering/LookAheadGuard.js';
 import { SentimentEngine } from '../engines/sentiment/SentimentEngine.js';
 import { QUEUE_NAMES } from '../queue/queues.js';
+import { prisma } from '../db/prisma.js';
 
 const logger = pino({ name: 'sentiment-worker' });
 const CONCURRENCY = parseInt(process.env['WORKER_SENTIMENT_CONCURRENCY'] ?? '1', 10);
@@ -37,14 +38,28 @@ const engine = new SentimentEngine(sentimentQueue);
 const worker = new Worker(
   QUEUE_NAMES.EVENTS,
   async (job: Job) => {
+    const { articleId, eventIds } = job.data as { articleId: string; eventIds?: string[] };
     try {
-      await engine.process(job.data);
+      // Fetch article from DB — SentimentEngine needs title + content
+      const article = await prisma.newsArticle.findUnique({ where: { id: articleId } });
+      if (!article) {
+        logger.warn({ articleId, jobId: job.id }, 'Article not found — skipping sentiment');
+        return;
+      }
+      // Run once per article; link to the primary event if available
+      const primaryEventId = eventIds?.[0];
+      await engine.process({
+        id: article.id,
+        title: article.title,
+        content: article.content,
+        eventId: primaryEventId,
+      });
     } catch (err) {
       if (err instanceof LookAheadBiasError) {
         logger.error({ err, jobId: job.id }, 'LookAheadBiasError — aborting without retry');
-        return; // complete without downstream publish
+        return;
       }
-      throw err; // BullMQ will retry per queue policy
+      throw err;
     }
   },
   { connection, concurrency: CONCURRENCY },
