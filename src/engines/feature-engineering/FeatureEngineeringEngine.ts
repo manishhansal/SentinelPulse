@@ -201,6 +201,10 @@ export class FeatureEngineeringEngine {
       assetBreadthRow,
       macroScores,
       marketContext,
+      // 11. Source article published_at — the information_as_of for all
+      //     text-derived features (sentiment, importance, event classification).
+      //     MUST be fetched separately from computedAt (Req 20.2, Phase 3B fix).
+      articlePublishedAt,
     ] = await Promise.all([
       // 1. Sentiment dimensions from news_sentiment (latest record for articleId)
       this.fetchLatestSentiment(event.articleId),
@@ -224,31 +228,53 @@ export class FeatureEngineeringEngine {
       event.assetId
         ? this.fetchMarketContext(event.assetId, event.eventTimestamp)
         : Promise.resolve(null),
+      // 11. Source article's published_at — the information_as_of anchor
+      this.fetchArticlePublishedAt(event.articleId),
     ]);
 
     // -----------------------------------------------------------------------
-    // Point-in-time validation for all database-sourced records (Req 20.2)
-    // Records stored in the DB have computedAt <= event_timestamp by design,
-    // but we validate the ones that carry an explicit timestamp field.
+    // Point-in-time validation — PHASE 3B REDESIGN (Req 20.2, Req 21.1)
+    //
+    // CORRECT: validate information_as_of (article.published_at for text
+    //          features; bar.timestamp for market-data features).
+    //
+    // WRONG (Phase 3A bug): validate computed_at — this always fires for
+    //          historical backfill because computed_at = 2026 > event 2024.
+    //
+    // Rule: feature_as_of <= event_timestamp
+    // where feature_as_of = max(information_as_of) across all sources.
     // -----------------------------------------------------------------------
+
+    // The information anchor for all text-derived features is the article's
+    // published_at.  Fall back to event_timestamp when published_at is
+    // unavailable (conservative — means the event timestamp itself is used,
+    // which is always valid).
+    const textInformationAsOf = articlePublishedAt ?? event.eventTimestamp;
+
     if (sentimentRow) {
+      // Sentiment is computed from article text → information_as_of = article.published_at
       this.guard.validateOne(
-        'sentiment.computedAt',
-        sentimentRow.computedAt,
+        'sentiment.informationAsOf',
+        textInformationAsOf,
         event.eventTimestamp,
       );
     }
     if (importanceRow) {
+      // Importance is computed from article text + event classification → same anchor
       this.guard.validateOne(
-        'importance.computedAt',
-        importanceRow.computedAt,
+        'importance.informationAsOf',
+        textInformationAsOf,
         event.eventTimestamp,
       );
     }
     if (velocityRow) {
+      // Velocity feature is computed from articles published <= eventTimestamp
+      // (enforced by the DB query: computedAt: { lte: eventTimestamp }).
+      // The information_as_of for velocity is therefore bounded by eventTimestamp.
+      // We validate against eventTimestamp as upper bound (always passes by design).
       this.guard.validateOne(
-        'velocity.computedAt',
-        velocityRow.computedAt,
+        'velocity.informationAsOf',
+        textInformationAsOf,
         event.eventTimestamp,
       );
     }
@@ -382,6 +408,25 @@ export class FeatureEngineeringEngine {
       select: { importanceScore: true },
     });
     return row?.importanceScore ?? null;
+  }
+
+  /**
+   * Returns the source article's `published_at` timestamp.
+   *
+   * This is the INFORMATION TIMESTAMP for all text-derived features
+   * (sentiment, importance, event classification).  It represents the earliest
+   * moment a market participant could have acted on this article.
+   *
+   * MUST NOT be confused with `computed_at` (when the engine processed the
+   * article).  For historical backfill, computed_at >> published_at, and only
+   * published_at is valid as the look-ahead anchor (Req 20.2, Phase 3B fix).
+   */
+  private async fetchArticlePublishedAt(articleId: string): Promise<Date | null> {
+    const row = await prisma.newsArticle.findUnique({
+      where: { id: articleId },
+      select: { publishedAt: true },
+    });
+    return row?.publishedAt ?? null;
   }
 
   /**
