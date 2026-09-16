@@ -99,8 +99,19 @@ export interface RegimeSignal {
 // ---------------------------------------------------------------------------
 
 interface RawHistoricalCandle {
-  /** ISO-8601 timestamp */
-  datetime: string;
+  /**
+   * Bar open time as Unix epoch SECONDS (integer).
+   *
+   * NOTE: The data-service v2 API returns a field named `time` containing a
+   * Unix epoch integer (e.g. 1704167100 = 2024-01-02T03:45:00Z).
+   * The field is NOT named `datetime` and is NOT an ISO-8601 string.
+   * Convert with: new Date(candle.time * 1000)
+   *
+   * BUG MKT-BUG-1 (fixed 2026-09-16): was incorrectly declared as
+   * `datetime: string` and mapped via `new Date(candle.datetime)` which
+   * always produced Invalid Date.
+   */
+  time: number;
   open: number;
   high: number;
   low: number;
@@ -233,7 +244,9 @@ export class DataServiceClient {
     );
 
     return (response.data?.data ?? []).map((candle) => ({
-      timestamp: new Date(candle.datetime),
+      // BUG MKT-BUG-1 fix: API returns `time` as Unix epoch seconds, not `datetime` ISO string.
+      // Multiply by 1000 to convert from seconds to milliseconds for the Date constructor.
+      timestamp: new Date(candle.time * 1000),
       open: candle.open,
       high: candle.high,
       low: candle.low,
