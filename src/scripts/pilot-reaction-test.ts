@@ -164,8 +164,19 @@ async function probeProviderOHLCV(
     for (const session of PILOT_SESSIONS) {
       for (const interval of intervals) {
         const from = new Date(session.date + 'T03:30:00.000Z'); // 09:00 IST
-        const to   = new Date(session.date + 'T10:15:00.000Z'); // 15:45 IST
-        const asOf = to;
+        // to must be the NEXT calendar day so the YYYY-MM-DD truncation in
+        // DataServiceClient.getOHLCV() produces from="YYYY-MM-DD" and
+        // to="YYYY-MM-DD+1" — a same-day from==to triggers HTTP 400.
+        const nextDay = new Date(from);
+        nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        const to   = nextDay;
+        // asOf must also be on the next calendar day so the asOf cap in
+        // DataServiceClient does NOT reduce effectiveTo back to the same
+        // date as from (which would re-trigger the HTTP 400).
+        // 10:15 UTC on the NEXT day is safely after session close.
+        const asOf = new Date(session.date + 'T10:15:00.000Z');
+        // Advance asOf to next day to survive the min(to, asOf) cap:
+        asOf.setUTCDate(asOf.getUTCDate() + 1);
 
         try {
           const response = await client.getOHLCV({

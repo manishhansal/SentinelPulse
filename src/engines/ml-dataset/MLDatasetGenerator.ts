@@ -446,67 +446,82 @@ export class MLDatasetGenerator {
   }): Promise<void> {
     const MAX_RETRIES = 3;
     const RETRY_DELAY_MS = 1_000;
-
     let lastError: unknown;
+
+    // Build the full data payload once — shared between create and update paths.
+    // Phase 3B.2 §17: uses upsert keyed on the canonical uniqueness tuple
+    // (eventId, assetId, predictionTimestamp, featureVersion) so that repeated
+    // calls for the same pilot window produce exactly one persisted row.
+    const sampleData = {
+      articleIds: sample.articleIds,
+      featureVectorId: sample.featureVectorId,
+      // Forward return values (raw percentages)
+      futureReturn5m: sample.forwardReturns['5m'].returnPct,
+      futureReturn15m: sample.forwardReturns['15m'].returnPct,
+      futureReturn30m: sample.forwardReturns['30m'].returnPct,
+      futureReturn1h: sample.forwardReturns['1h'].returnPct,
+      futureReturn4h: sample.forwardReturns['4h'].returnPct,
+      futureReturn1d: sample.forwardReturns['1d'].returnPct,
+      // Directional labels
+      label5m: sample.labels['5m'],
+      label15m: sample.labels['15m'],
+      label30m: sample.labels['30m'],
+      label1h: sample.labels['1h'],
+      label4h: sample.labels['4h'],
+      label1d: sample.labels['1d'],
+      // Label cutoff timestamps
+      labelCutoff5m: sample.labelCutoffs['5m'],
+      labelCutoff15m: sample.labelCutoffs['15m'],
+      labelCutoff30m: sample.labelCutoffs['30m'],
+      labelCutoff1h: sample.labelCutoffs['1h'],
+      labelCutoff4h: sample.labelCutoffs['4h'],
+      labelCutoff1d: sample.labelCutoffs['1d'],
+      // Phase 3B.1 (Gap PT-G5): exact bar timestamps used for each label
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({
+        labelBarTimestamp5m:  sample.labelBarTimestamps['5m'],
+        labelBarTimestamp15m: sample.labelBarTimestamps['15m'],
+        labelBarTimestamp30m: sample.labelBarTimestamps['30m'],
+        labelBarTimestamp1h:  sample.labelBarTimestamps['1h'],
+        labelBarTimestamp4h:  sample.labelBarTimestamps['4h'],
+        labelBarTimestamp1d:  sample.labelBarTimestamps['1d'],
+      } as any),
+      // Provenance fields (Req 22.3)
+      featureVersion: this.featureVersion,
+      pipelineVersion: this.pipelineVersion,
+      marketDataSnapshotVersion: this.marketDataSnapshotVersion,
+      modelVersion: this.modelVersion,
+    };
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        await prisma.newsTrainingSample.create({
-          data: {
+        // Phase 3B.2 §17: upsert on the canonical identity key so that
+        // generate() is idempotent — calling it twice for the same event/asset
+        // produces exactly one row, not two.
+        // The where clause matches the @@unique constraint added in migration 004.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (prisma.newsTrainingSample as any).upsert({
+          where: {
+            uq_training_sample_identity: {
+              eventId:             sample.eventId,
+              assetId:             sample.assetId,
+              predictionTimestamp: sample.predictionTimestamp,
+              featureVersion:      this.featureVersion,
+            },
+          },
+          create: {
             id: sample.id,
             eventId: sample.eventId,
             assetId: sample.assetId,
-            articleIds: sample.articleIds,
-            featureVectorId: sample.featureVectorId,
-
-            // Phase 3B.1 (Gap PT-G3): explicit prediction_timestamp
-            // NOTE: predictionTimestamp column is new in migration 003.
-            // Prisma client types will include it after `prisma generate`.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ...({ predictionTimestamp: sample.predictionTimestamp } as any),
-
-            // Forward return values (raw percentages)
-            futureReturn5m: sample.forwardReturns['5m'].returnPct,
-            futureReturn15m: sample.forwardReturns['15m'].returnPct,
-            futureReturn30m: sample.forwardReturns['30m'].returnPct,
-            futureReturn1h: sample.forwardReturns['1h'].returnPct,
-            futureReturn4h: sample.forwardReturns['4h'].returnPct,
-            futureReturn1d: sample.forwardReturns['1d'].returnPct,
-
-            // Directional labels
-            label5m: sample.labels['5m'],
-            label15m: sample.labels['15m'],
-            label30m: sample.labels['30m'],
-            label1h: sample.labels['1h'],
-            label4h: sample.labels['4h'],
-            label1d: sample.labels['1d'],
-
-            // Label cutoff timestamps
-            labelCutoff5m: sample.labelCutoffs['5m'],
-            labelCutoff15m: sample.labelCutoffs['15m'],
-            labelCutoff30m: sample.labelCutoffs['30m'],
-            labelCutoff1h: sample.labelCutoffs['1h'],
-            labelCutoff4h: sample.labelCutoffs['4h'],
-            labelCutoff1d: sample.labelCutoffs['1d'],
-
-            // Phase 3B.1 (Gap PT-G5): exact bar timestamps used for each label
-            // NOTE: labelBarTimestamp_* columns are new in migration 003.
-            // Prisma client types will include them after `prisma generate`.
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ...({
-              labelBarTimestamp5m:  sample.labelBarTimestamps['5m'],
-              labelBarTimestamp15m: sample.labelBarTimestamps['15m'],
-              labelBarTimestamp30m: sample.labelBarTimestamps['30m'],
-              labelBarTimestamp1h:  sample.labelBarTimestamps['1h'],
-              labelBarTimestamp4h:  sample.labelBarTimestamps['4h'],
-              labelBarTimestamp1d:  sample.labelBarTimestamps['1d'],
-            } as any),
-
-            // Provenance fields (Req 22.3)
-            featureVersion: this.featureVersion,
-            pipelineVersion: this.pipelineVersion,
-            marketDataSnapshotVersion: this.marketDataSnapshotVersion,
-            modelVersion: this.modelVersion,
+            ...sampleData,
+          },
+          update: {
+            // On conflict: refresh all mutable fields (labels, returns, cutoffs).
+            // Identity fields (eventId, assetId, predictionTimestamp, featureVersion)
+            // remain immutable once written.
+            ...sampleData,
           },
         });
         return; // success
@@ -517,7 +532,6 @@ export class MLDatasetGenerator {
         }
       }
     }
-
     // All retries exhausted
     throw lastError;
   }

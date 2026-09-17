@@ -453,14 +453,12 @@ model NewsFeature {
   momentum        Float?
   featureVersion  String    @map("feature_version")
   pipelineVersion String    @map("pipeline_version")
-  /**
-   * Phase 3B.1 (Gap PT-G2): the latest information timestamp across all data
-   * sources contributing to this feature vector.
-   *   - Text-derived features: article.published_at
-   *   - Market-data features:  bar.timestamp (bar open time)
-   * MUST be <= prediction_timestamp.
-   * Distinct from computed_at (wall-clock when engine ran) — see TEMPORAL_DATA_CONTRACT.md.
-   */
+  /// Phase 3B.1 (Gap PT-G2): the latest information timestamp across all data
+  /// sources contributing to this feature vector.
+  ///   - Text-derived features: article.published_at
+  ///   - Market-data features:  bar.timestamp (bar open time)
+  /// MUST be <= prediction_timestamp.
+  /// Distinct from computed_at (wall-clock when engine ran) — see TEMPORAL_DATA_CONTRACT.md.
   featureAsOf     DateTime? @map("feature_as_of") @db.Timestamptz
   computedAt      DateTime  @default(now()) @map("computed_at") @db.Timestamptz
 
@@ -506,12 +504,9 @@ model NewsTrainingSample {
   assetId                   String    @map("asset_id")
   articleIds                String[]  @map("article_ids")
   featureVectorId           String    @map("feature_vector_id") @db.Uuid
-  /**
-   * Phase 3B.1 (Gap PT-G3): the moment at which AlphaForge would generate a
-   * signal using the features in this sample.
-   * Initial training policy: prediction_timestamp = event_timestamp.
-   * INVARIANT: feature_as_of <= prediction_timestamp < label_cutoff_X.
-   */
+  /// Phase 3B.1 (Gap PT-G3): the moment at which AlphaForge generates a signal.
+  /// Initial training policy: prediction_timestamp = event_timestamp.
+  /// INVARIANT: feature_as_of <= prediction_timestamp < label_cutoff_X.
   predictionTimestamp       DateTime? @map("prediction_timestamp") @db.Timestamptz
   futureReturn5m            Float?    @map("future_return_5m")
   futureReturn15m           Float?    @map("future_return_15m")
@@ -549,6 +544,7 @@ model NewsTrainingSample {
   event         NewsEvent   @relation(fields: [eventId], references: [id])
   featureVector NewsFeature @relation(fields: [featureVectorId], references: [id])
 
+  @@unique([eventId, assetId, predictionTimestamp, featureVersion], name: "uq_training_sample_identity")
   @@index([eventId, assetId, featureVersion])
   @@index([assetId, createdAt(sort: Desc)])
   @@index([predictionTimestamp(sort: Desc)])
