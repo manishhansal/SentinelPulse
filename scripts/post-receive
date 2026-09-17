@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# =============================================================================
+# SentinelPulse — Git post-receive hook
+#
+# Install this on your self-hosted / bare git server so that every push
+# automatically rebuilds and redeploys the Docker stack on the same machine.
+#
+# Setup (run once on the server):
+# ─────────────────────────────────────────────────────────────────────────────
+#   # 1. Create a bare repo (if you don't already have one)
+#   git init --bare /srv/git/sentinelpulse.git
+#
+#   # 2. Copy (or symlink) this file into the bare repo's hooks directory
+#   cp scripts/post-receive /srv/git/sentinelpulse.git/hooks/post-receive
+#   chmod +x /srv/git/sentinelpulse.git/hooks/post-receive
+#
+#   # 3. Edit the two variables below to match your server layout
+#   WORK_TREE="/opt/sentinelpulse"   # where the live checkout lives
+#   DEPLOY_BRANCH="main"             # which branch triggers a redeploy
+#
+#   # 4. Clone / init the work-tree checkout (first time only)
+#   git clone /srv/git/sentinelpulse.git "${WORK_TREE}"
+#
+#   # 5. Add the bare repo as a remote on your dev machine
+#   git remote add prod ssh://user@server/srv/git/sentinelpulse.git
+#
+# From your dev machine, a normal push now triggers an auto-deploy:
+#   git push prod main
+# =============================================================================
+set -euo pipefail
+
+# ── Configuration — edit these to match your server ──────────────────────────
+
+WORK_TREE="/opt/sentinelpulse"     # live checkout directory
+BARE_REPO="$(cd "$(dirname "$0")/.." && pwd)"  # auto-detected from hook location
+DEPLOY_BRANCH="main"               # branch that triggers deployment
+ENV_FILE="${WORK_TREE}/.env.local"
+DEPLOY_SCRIPT="${WORK_TREE}/deploy.sh"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+log()  { echo "[post-receive] $*"; }
+warn() { echo "[post-receive] ⚠  $*"; }
+ok()   { echo "[post-receive] ✓  $*"; }
+err()  { echo "[post-receive] ✗  $*" >&2; }
+
+log "Hook triggered at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+# ── Read pushed refs ──────────────────────────────────────────────────────────
+
+DEPLOYED=false
+
+# post-receive receives lines of: <old-sha> <new-sha> <refname>
+while read -r OLD_SHA NEW_SHA REF_NAME; do
+  BRANCH="${REF_NAME##refs/heads/}"
+
+  log "Received push: ${BRANCH} (${OLD_SHA:0:8}..${NEW_SHA:0:8})"
+
+  if [[ "${BRANCH}" != "${DEPLOY_BRANCH}" ]]; then
+    log "Branch '${BRANCH}' is not the deploy branch ('${DEPLOY_BRANCH}'). Skipping."
+    continue
+  fi
+
+  # ── Update the work-tree checkout ─────────────────────────────────────────
+
+  log "Updating work-tree at ${WORK_TREE}..."
+
+  if [[ ! -d "${WORK_TREE}" ]]; then
+    err "Work-tree directory does not exist: ${WORK_TREE}"
+    err "Run: git clone ${BARE_REPO} ${WORK_TREE}"
+    exit 1
+  fi
+
+  # Export the pushed tree into the work-tree without a separate fetch step.
+  # GIT_DIR + GIT_WORK_TREE let git commands work against the bare repo but
+  # write files into the live checkout directory.
+  GIT_DIR="${BARE_REPO}" GIT_WORK_TREE="${WORK_TREE}" \
+    git checkout -f "${DEPLOY_BRANCH}"
+
+  GIT_DIR="${BARE_REPO}" GIT_WORK_TREE="${WORK_TREE}" \
+    git reset --hard "${NEW_SHA}"
+
+  ok "Work-tree updated to ${NEW_SHA:0:8}."
+
+  # ── Validate env file ──────────────────────────────────────────────────────
+
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    err "Env file not found: ${ENV_FILE}"
+    err "Create ${ENV_FILE} on the server before deploying."
+    exit 1
+  fi
+
+  # ── Run deploy.sh ──────────────────────────────────────────────────────────
+
+  if [[ ! -f "${DEPLOY_SCRIPT}" ]]; then
+    err "deploy.sh not found at ${DEPLOY_SCRIPT}"
+    exit 1
+  fi
+
+  chmod +x "${DEPLOY_SCRIPT}"
+
+  log "Starting deploy.sh --no-pull ..."
+  echo ""
+
+  # Run deploy.sh in the work-tree; --no-pull because we just updated it above.
+  if bash "${DEPLOY_SCRIPT}" --no-pull --env-file "${ENV_FILE}"; then
+    ok "Deploy succeeded for branch '${BRANCH}' at ${NEW_SHA:0:8}."
+    DEPLOYED=true
+  else
+    EXIT_CODE=$?
+    err "deploy.sh exited with code ${EXIT_CODE}."
+    if [[ ${EXIT_CODE} -eq 2 ]]; then
+      err "Health check failed — automatic rollback was attempted by deploy.sh."
+    fi
+    exit ${EXIT_CODE}
+  fi
+done
+
+if [[ "${DEPLOYED}" == "false" ]]; then
+  log "No deploy-eligible branches were pushed. Nothing to do."
+fi
