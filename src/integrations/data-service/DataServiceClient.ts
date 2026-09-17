@@ -41,6 +41,47 @@ export interface OHLCVBar {
 }
 
 /**
+ * Extended OHLCV response that surfaces provider metadata for auditing.
+ *
+ * Phase 3B.1 (MKT-G1 fix): DataServiceClient now returns this envelope so
+ * callers (HistoricalReactionEngine, FeatureEngineeringEngine) can log which
+ * provider served the data, whether a fallback occurred, and whether data was
+ * available at all.
+ *
+ * The `bars` field carries the same `OHLCVBar[]` as the previous return type,
+ * so the change is additive.  Callers that only need bars may ignore the rest.
+ */
+export interface OHLCVResponse {
+  /** The OHLCV bars returned by the provider. Empty when no data is available. */
+  bars: OHLCVBar[];
+  /**
+   * The provider that ultimately served the data (from data-service metadata).
+   * null when no provider could serve the requested range.
+   */
+  provider: string | null;
+  /**
+   * True when the data-service fell back from a higher-priority provider to a
+   * lower-priority one (e.g. Angel One → Yahoo Finance).
+   * Determined by whether `provider` differs from 'angel_one'.
+   */
+  fallbackUsed: boolean;
+  /**
+   * True when at least one bar was returned.
+   * False when all providers returned empty or failed.
+   */
+  dataAvailable: boolean;
+  /** The date range actually requested (after asOf cap). */
+  requestedRange: { from: Date; to: Date };
+  /**
+   * The actual date range of returned bars, or null when no bars were returned.
+   * Derived from the first and last bar timestamp.
+   */
+  actualRange: { from: Date; to: Date } | null;
+  /** Number of bars returned. */
+  barCount: number;
+}
+
+/**
  * A point-in-time market context snapshot for a single asset.
  * Sourced from GET /v1/india/quotes/{symbol}.
  * Used by FeatureEngineeringEngine to assemble market-context features
@@ -173,17 +214,34 @@ interface RawInstrument {
  *
  * Every method applies SSRF validation before making the network call
  * (Req 30.4) and enforces a 10-second timeout (Req 30.6, Req 12.4).
+ *
+ * Phase 3B.1 additions:
+ *   - `getOHLCV()` now returns `OHLCVResponse` (bars + provider metadata).
+ *   - `getOHLCVBars()` convenience wrapper returns only `OHLCVBar[]` for
+ *     callers that do not need metadata (backward-compatible).
+ *   - `providerOverride` constructor option enables test-only provider forcing
+ *     for waterfall certification (Tests A–D).
  */
 export class DataServiceClient {
   private readonly http: AxiosInstance;
   private readonly baseUrl: string;
+  /**
+   * Test-only: when set, this value is appended to the query as
+   * `force_provider=<providerOverride>`.  This causes the data-service to
+   * skip all higher-priority providers and use only the specified one.
+   *
+   * Set via the constructor option `providerOverride`.
+   * MUST NOT be set in production code — for test-only DI.
+   */
+  private readonly providerOverride: string | undefined;
 
-  constructor(baseUrl?: string, apiKey?: string) {
+  constructor(baseUrl?: string, apiKey?: string, providerOverride?: string) {
     this.baseUrl = (
       baseUrl ?? process.env['DATA_SERVICE_URL'] ?? 'http://localhost:8200'
     ).replace(/\/$/, '');
 
     const key = apiKey ?? process.env['DATA_SERVICE_API_KEY'] ?? '';
+    this.providerOverride = providerOverride;
 
     this.http = axios.create({
       baseURL: this.baseUrl,
@@ -209,6 +267,10 @@ export class DataServiceClient {
    * The `asOf` parameter is used as the upper bound on `to` to guarantee
    * point-in-time correctness (Req 20.1, Req 21.1).
    *
+   * Phase 3B.1 (MKT-G1 fix): now returns `OHLCVResponse` which includes
+   * provider metadata (`provider`, `fallbackUsed`, `dataAvailable`,
+   * `requestedRange`, `actualRange`, `barCount`).
+   *
    * @param params.assetId  Trading symbol (e.g. "RELIANCE", "NIFTY")
    * @param params.from     Start of the range (inclusive)
    * @param params.to       End of the range (inclusive, capped at asOf)
@@ -225,25 +287,35 @@ export class DataServiceClient {
     /** Point-in-time anchor. MUST be <= event_timestamp to avoid look-ahead bias. */
     asOf: Date;
     interval?: string;
-  }): Promise<OHLCVBar[]> {
+  }): Promise<OHLCVResponse> {
     validateOutboundUrl(this.baseUrl); // Req 30.4
 
     // Enforce point-in-time: cap `to` at `asOf`
     const effectiveTo = params.to > params.asOf ? params.asOf : params.to;
 
+    const queryParams: Record<string, string> = {
+      symbol: params.assetId,
+      interval: params.interval ?? '1d',
+      from: params.from.toISOString().split('T')[0]!, // data-service expects YYYY-MM-DD
+      to: effectiveTo.toISOString().split('T')[0]!,
+    };
+
+    // Test-only: inject provider override if set.
+    // This allows waterfall certification tests (A–D) to force a specific
+    // provider without modifying production data-service configuration.
+    if (this.providerOverride) {
+      queryParams['force_provider'] = this.providerOverride;
+    }
+
     const response = await this.http.get<RawHistoricalResponse>(
       '/v1/india/historical',
-      {
-        params: {
-          symbol: params.assetId,
-          interval: params.interval ?? '1d',
-          from: params.from.toISOString().split('T')[0], // data-service expects YYYY-MM-DD
-          to: effectiveTo.toISOString().split('T')[0],
-        },
-      },
+      { params: queryParams },
     );
 
-    return (response.data?.data ?? []).map((candle) => ({
+    const rawBars = response.data?.data ?? [];
+    const metadata = response.data?.metadata;
+
+    const bars: OHLCVBar[] = rawBars.map((candle) => ({
       // BUG MKT-BUG-1 fix: API returns `time` as Unix epoch seconds, not `datetime` ISO string.
       // Multiply by 1000 to convert from seconds to milliseconds for the Date constructor.
       timestamp: new Date(candle.time * 1000),
@@ -253,6 +325,49 @@ export class DataServiceClient {
       close: candle.close,
       volume: candle.volume,
     }));
+
+    const provider = metadata?.provider ?? null;
+    const dataAvailable = bars.length > 0;
+
+    // fallbackUsed: true when a fallback provider was used (i.e. not angel_one,
+    // or angel_one was primary but another provider served).
+    // We infer fallback by checking if provider is not angel_one when data is available.
+    const fallbackUsed = dataAvailable && provider !== null && provider !== 'angel_one';
+
+    const requestedRange = { from: params.from, to: effectiveTo };
+    const actualRange = dataAvailable
+      ? {
+          from: bars[0]!.timestamp,
+          to: bars[bars.length - 1]!.timestamp,
+        }
+      : null;
+
+    return {
+      bars,
+      provider,
+      fallbackUsed,
+      dataAvailable,
+      requestedRange,
+      actualRange,
+      barCount: bars.length,
+    };
+  }
+
+  /**
+   * Convenience wrapper that returns only the `OHLCVBar[]` array from
+   * `getOHLCV()`.  Callers that do not need provider metadata can use this
+   * instead of destructuring the full `OHLCVResponse`.
+   *
+   * Equivalent to `(await getOHLCV(params)).bars`.
+   */
+  async getOHLCVBars(params: {
+    assetId: string;
+    from: Date;
+    to: Date;
+    asOf: Date;
+    interval?: string;
+  }): Promise<OHLCVBar[]> {
+    return (await this.getOHLCV(params)).bars;
   }
 
   // --------------------------------------------------------------------------
