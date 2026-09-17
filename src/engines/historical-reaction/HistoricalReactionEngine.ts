@@ -26,7 +26,7 @@
 
 import { pino } from 'pino';
 import type { AxiosError } from 'axios';
-import type { DataServiceClient, OHLCVBar } from '../../integrations/data-service/DataServiceClient.js';
+import type { DataServiceClient, OHLCVBar, OHLCVResponse } from '../../integrations/data-service/DataServiceClient.js';
 import { prisma } from '../../db/prisma.js';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,10 @@ interface OffsetBar {
   timedOut: boolean;
   /** True when the data-service returned no bar (market closed / no data). */
   marketClosed: boolean;
+  /** Provider that served this offset's data (from OHLCVResponse metadata). */
+  provider: string | null;
+  /** True when the data-service used a fallback provider for this offset. */
+  fallbackUsed: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,53 @@ interface OffsetBar {
 
 /** Window used when querying OHLCV: 1-bar window centred on the offset. */
 const BAR_WINDOW_MS = 60_000; // 1 minute window — fetches the bar that covers the offset
+
+// ---------------------------------------------------------------------------
+// Interval mapping (fix for RXN-G1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps each named reaction offset to the OHLCV interval that correctly
+ * resolves a single bar at that offset.
+ *
+ * Design decision (RXN-G1 fix, 2026-09-16):
+ *   - Intraday offsets (T±15m, T±5m, T+1m, T+5m, T+15m, T+30m, T+1h, T+4h):
+ *       Use '5m' bars.  A 5-minute interval is the finest granularity supported
+ *       by all three providers (Angel One, Upstox, Yahoo intraday) and avoids
+ *       the ambiguity of 1m bars (which Angel One does not always expose).
+ *       The 1-minute fetch window (BAR_WINDOW_MS) with a 5m interval will return
+ *       the bar whose OPEN falls within [offsetTime − 1m, offsetTime].
+ *   - Daily offset (T+1d):
+ *       Use '1d' bars.  A daily bar is the only sensible resolution for a 24-hour
+ *       forward horizon.  Using a 5-minute bar for T+1d would require querying
+ *       a multi-hour window and picking the correct session close, which adds
+ *       unnecessary complexity.
+ *
+ * The reaction engine MUST NOT pass interval=undefined (which lets DataServiceClient
+ * default to '1d') for intraday offsets — that was the original RXN-G1 bug.
+ */
+export type ReactionOffsetName =
+  | 'minus15m'
+  | 'minus5m'
+  | 'plus1m'
+  | 'plus5m'
+  | 'plus15m'
+  | 'plus30m'
+  | 'plus1h'
+  | 'plus4h'
+  | 'plus1d';
+
+/**
+ * Returns the OHLCV interval string for the given reaction offset.
+ *
+ * All intraday offsets → '5m'
+ * Daily offset (plus1d) → '1d'
+ *
+ * This function is exported so it can be tested independently.
+ */
+export function intervalForOffset(offsetName: ReactionOffsetName): string {
+  return offsetName === 'plus1d' ? '1d' : '5m';
+}
 
 // ---------------------------------------------------------------------------
 // HistoricalReactionEngine
@@ -148,26 +199,29 @@ export class HistoricalReactionEngine {
 
   /**
    * Fetch all offset bars for a single asset and persist the reaction record.
+   *
+   * Each offset is fetched with the interval appropriate to its resolution
+   * (fix for RXN-G1: intraday → '5m', daily → '1d').
    */
   private async processAsset(
     event: ReactionEvent,
     assetId: string,
     offsets: ReactionOffsets,
   ): Promise<void> {
-    // Fetch the pre-event baseline (-5 min) first.
-    const baselineBar = await this.fetchBar(assetId, offsets.minus5m);
+    // Fetch the pre-event baseline (-5 min) — intraday interval.
+    const baselineBar = await this.fetchBar(assetId, offsets.minus5m, 'minus5m');
 
-    // Fetch all forward offsets (including -15m for pre-event context).
+    // Fetch all other offsets with their correct intervals.
     const [minus15mBar, plus1mBar, plus5mBar, plus15mBar, plus30mBar, plus1hBar, plus4hBar, plus1dBar] =
       await Promise.all([
-        this.fetchBar(assetId, offsets.minus15m),
-        this.fetchBar(assetId, offsets.plus1m),
-        this.fetchBar(assetId, offsets.plus5m),
-        this.fetchBar(assetId, offsets.plus15m),
-        this.fetchBar(assetId, offsets.plus30m),
-        this.fetchBar(assetId, offsets.plus1h),
-        this.fetchBar(assetId, offsets.plus4h),
-        this.fetchBar(assetId, offsets.plus1d),
+        this.fetchBar(assetId, offsets.minus15m, 'minus15m'),
+        this.fetchBar(assetId, offsets.plus1m,   'plus1m'),
+        this.fetchBar(assetId, offsets.plus5m,   'plus5m'),
+        this.fetchBar(assetId, offsets.plus15m,  'plus15m'),
+        this.fetchBar(assetId, offsets.plus30m,  'plus30m'),
+        this.fetchBar(assetId, offsets.plus1h,   'plus1h'),
+        this.fetchBar(assetId, offsets.plus4h,   'plus4h'),
+        this.fetchBar(assetId, offsets.plus1d,   'plus1d'),
       ]);
 
     const baselineClose = baselineBar.bar?.close ?? null;
@@ -216,6 +270,13 @@ export class HistoricalReactionEngine {
       plus4hBar.timedOut ||
       plus1dBar.timedOut;
 
+    // Determine which provider served the baseline (most representative for this reaction).
+    // If the baseline was market-closed or timed out, use the first available provider
+    // from any offset, or null.
+    const allBars = [baselineBar, minus15mBar, plus1mBar, plus5mBar, plus15mBar, plus30mBar, plus1hBar, plus4hBar, plus1dBar];
+    const servedProvider = allBars.find((b) => b.provider !== null)?.provider ?? null;
+    const anyFallback = allBars.some((b) => b.fallbackUsed);
+
     await this.upsertReaction({
       eventId: event.id,
       assetId,
@@ -231,6 +292,11 @@ export class HistoricalReactionEngine {
       highImpactFlag,
       marketOpen,
       dataServiceTimeout,
+      provider: servedProvider,
+      fallbackUsed: anyFallback,
+      // Phase 3B.1 Phase 8: reaction window for temporal validation
+      reactionWindowStart: offsets.minus15m,
+      reactionWindowEnd: offsets.plus1d,
     });
 
     logger.debug(
@@ -258,6 +324,10 @@ export class HistoricalReactionEngine {
    * parameter equal to `offsetTime` is passed so the data-service returns
    * only data that was available at that exact moment (Req 12.1, Req 20.1).
    *
+   * The `offsetName` determines which OHLCV interval to request:
+   *   - intraday offsets → '5m'  (fix for RXN-G1)
+   *   - plus1d           → '1d'
+   *
    * Rules:
    *   - On timeout (AxiosError with code ECONNABORTED / ETIMEDOUT or
    *     "timeout" in message): returns `{ bar: null, timedOut: true, marketClosed: false }`.
@@ -266,28 +336,44 @@ export class HistoricalReactionEngine {
    *     `{ bar: null, timedOut: false, marketClosed: true }` (Req 12.3).
    *   - On any other error: re-throws so the caller can handle / log it.
    */
-  private async fetchBar(assetId: string, offsetTime: Date): Promise<OffsetBar> {
+  private async fetchBar(
+    assetId: string,
+    offsetTime: Date,
+    offsetName: ReactionOffsetName,
+  ): Promise<OffsetBar> {
     // Query a 1-minute window ending at offsetTime.
     const from = new Date(offsetTime.getTime() - BAR_WINDOW_MS);
     const to = offsetTime;
 
+    // Select the correct interval for this offset (RXN-G1 fix).
+    const interval = intervalForOffset(offsetName);
+
     try {
-      const bars = await this.dataServiceClient.getOHLCV({
+      const response: OHLCVResponse = await this.dataServiceClient.getOHLCV({
         assetId,
         from,
         to,
         // asOf MUST be <= offset timestamp to prevent look-ahead bias (Req 12.1, Req 20.1).
         asOf: offsetTime,
+        // RXN-G1 fix: pass the interval explicitly — never rely on the '1d' default
+        // for intraday offsets.  5m for intraday, 1d for T+1d.
+        interval,
       });
 
-      if (bars.length === 0) {
+      if (response.bars.length === 0) {
         // No data — market closed or no bar available at this offset (Req 12.3).
-        return { bar: null, timedOut: false, marketClosed: true };
+        return {
+          bar: null,
+          timedOut: false,
+          marketClosed: true,
+          provider: response.provider,
+          fallbackUsed: response.fallbackUsed,
+        };
       }
 
       // Use the last bar in the window (closest to offsetTime).
-      const bar = bars[bars.length - 1]!;
-      return { bar, timedOut: false, marketClosed: false };
+      const bar = response.bars[response.bars.length - 1]!;
+      return { bar, timedOut: false, marketClosed: false, provider: response.provider, fallbackUsed: response.fallbackUsed };
     } catch (err: unknown) {
       if (isTimeoutError(err)) {
         // Req 12.4: on timeout → null for all fields, data_service_timeout = true, no retry.
@@ -295,7 +381,7 @@ export class HistoricalReactionEngine {
           { assetId, offsetTime: offsetTime.toISOString() },
           'HistoricalReactionEngine: data-service timeout — recording null',
         );
-        return { bar: null, timedOut: true, marketClosed: false };
+        return { bar: null, timedOut: true, marketClosed: false, provider: null, fallbackUsed: false };
       }
       // Propagate unexpected errors so the caller can log and skip this asset.
       throw err;
@@ -373,6 +459,9 @@ export class HistoricalReactionEngine {
   /**
    * Upserts a `news_market_reactions` row.
    * Idempotency key: UNIQUE(event_id, asset_id) (Req 12.5).
+   *
+   * Phase 3B.1: also persists `provider` and `fallbackUsed` so downstream
+   * auditing can determine which data-service provider generated each reaction.
    */
   private async upsertReaction(data: {
     eventId: string;
@@ -389,6 +478,14 @@ export class HistoricalReactionEngine {
     highImpactFlag: boolean;
     marketOpen: boolean;
     dataServiceTimeout: boolean;
+    /** Which data-service provider served the baseline bar. */
+    provider: string | null;
+    /** Whether a fallback provider was used for any offset. */
+    fallbackUsed: boolean;
+    /** Start of the reaction window: event_timestamp - 15m (for temporal audit). */
+    reactionWindowStart: Date;
+    /** End of the reaction window: event_timestamp + 1d (for temporal audit). */
+    reactionWindowEnd: Date;
   }): Promise<void> {
     const now = new Date();
 
@@ -399,6 +496,10 @@ export class HistoricalReactionEngine {
           assetId: data.assetId,
         },
       },
+      // NOTE: reactionWindowStart and reactionWindowEnd are new columns added in
+      // migration 003_pit_auditability.  The Prisma client types will include
+      // them once `prisma generate` is run after applying the migration.
+      // Until then we use a type assertion — the columns exist in the DB schema.
       create: {
         eventId: data.eventId,
         assetId: data.assetId,
@@ -414,6 +515,11 @@ export class HistoricalReactionEngine {
         highImpactFlag: data.highImpactFlag,
         marketOpen: data.marketOpen,
         dataServiceTimeout: data.dataServiceTimeout,
+        dataServiceSnapshotVersion: data.provider
+          ? `${data.provider}${data.fallbackUsed ? '+fallback' : ''}`
+          : null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...({ reactionWindowStart: data.reactionWindowStart, reactionWindowEnd: data.reactionWindowEnd } as any),
         computedAt: now,
       },
       update: {
@@ -429,6 +535,11 @@ export class HistoricalReactionEngine {
         highImpactFlag: data.highImpactFlag,
         marketOpen: data.marketOpen,
         dataServiceTimeout: data.dataServiceTimeout,
+        dataServiceSnapshotVersion: data.provider
+          ? `${data.provider}${data.fallbackUsed ? '+fallback' : ''}`
+          : null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...({ reactionWindowStart: data.reactionWindowStart, reactionWindowEnd: data.reactionWindowEnd } as any),
         computedAt: now,
       },
     });
