@@ -20,7 +20,7 @@ Classification key:
 |---|---|---|
 | PostgreSQL (TimescaleDB, port 5444) | IMPLEMENTED + VERIFIED | Running healthy, has `sentinel_pulse` DB with 23 tables + pgvector |
 | Redis (port 6379) | IMPLEMENTED + VERIFIED | alpha-forge-redis shared; PING confirmed |
-| SentinelPulse Fastify API (port 3000) | IMPLEMENTED + UNVERIFIED | Code complete; `npm run dev` never started |
+| SentinelPulse Fastify API (port 3001) | IMPLEMENTED + VERIFIED | Runtime certified Phase 3A; `npm run dev` confirmed running on port 3001 |
 | Scrapling sidecar (port 8001) | PARTIAL | `docker/scrapling_service.py` exists; Docker image defined; sidecar NOT running |
 | data-service (port 8200) | IMPLEMENTED + VERIFIED | Running healthy; 34,459 instruments |
 | ml-service (port 8100) | IMPLEMENTED + VERIFIED | Running healthy; 5 models loaded |

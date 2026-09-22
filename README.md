@@ -6,8 +6,9 @@ SentinelPulse is a production-grade service that transforms raw financial news i
 
 Every output is point-in-time correct (enforced by `LookAheadGuard`), source-isolated (enforced by `CircuitBreaker` per adapter), and fully traceable from `TrainingSample` back to the original raw article.
 
-> **Phase 3A status:** Runtime certified. 4 live sources ingesting. Full pipeline operational.  
-> See `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` for the complete audit.
+> **Current status — Phase 3B.2 (2026-09-18):** All 578 unit tests passing. Three data-service root causes fixed (Upstox key mismatch, Redis checkpoint blocking backfill, missing Docker env vars). Historical intraday OHLCV fully operational for all 8 instruments × 4 intervals. Training dataset idempotency enforced via DB-level unique constraint (migration 004). Market data provider waterfall certified (5/5 tests). 13/13 Phase 3B.2 Go/No-Go decisions evaluated.  
+> See `PHASE3B2_CERTIFICATION_REPORT.md` for the complete audit.  
+> Previous phase reports: `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` (Phase 3A), `PHASE3B_PREFLIGHT_REPORT.md` (Phase 3B preflight).
 
 ### Pipeline Overview
 
@@ -37,15 +38,29 @@ AlphaForge API  /  ml-service  /  Admin API
 
 ---
 
+## Phase History
+
+| Phase | Date | Status | Summary |
+|---|---|---|---|
+| Phase 2 | 2026-09-15 | ✅ Complete | Validation report — core pipeline functional |
+| Phase 3A | 2026-09-15 | ✅ Certified | Runtime cert; 4 live sources; InstrumentIndex; MlServiceClient; DataFreshness; 464 tests |
+| Phase 3B Preflight | 2026-09-16 | ✅ Complete | LookAheadGuard redesign (BUG-LAG-1 fixed); DataServiceClient timestamp fix; 2 critical bugs resolved |
+| Phase 3B.1 | 2026-09-17 | ✅ Certified | RXN-G1 interval fix; OHLCVResponse envelope; prediction_timestamp + feature_as_of + label_bar_timestamps persisted; provider metadata; 578 tests |
+| Phase 3B.2 | 2026-09-18 | ✅ Certified | 3 data-service root causes fixed (RC-1/RC-2/RC-3); full intraday OHLCV for 8 instruments × 4 intervals; training idempotency (migration 004 + upsert); pilot probe 37/40 daily sessions |
+| Phase 3B.3 | TBD | 🔜 Pending | Rebuild data-service Docker image; Jan 2024 news ingestion; historical reactions; 7-day pilot |
+
+---
+
 ## Prerequisites
 
 | Dependency | Version | Notes |
 |---|---|---|
 | Node.js | ≥ 20 LTS | Use nvm: `nvm use 20` |
-| PostgreSQL | 16 + pgvector | TimescaleDB with pgvector; must have `vector` extension |
+| PostgreSQL | 16 + pgvector | Must have `vector` extension; shared with AlphaForge stack |
 | Redis | 7 | Shared with AlphaForge in the local dev stack |
 | Docker & Docker Compose | Latest stable | For the full containerised stack |
 | Python | 3.11+ | Powers the Scrapling sidecar |
+| data-service | v2.0.0+ | Provides OHLCV + InstrumentMaster; Angel One & Upstox credentials required for intraday |
 
 ---
 
@@ -349,7 +364,7 @@ pm2 delete all                    # remove from pm2 list
 
 | Script | Description |
 |---|---|
-| `npm test` | Full test suite (464 tests) |
+| `npm test` | Full test suite (578 tests) |
 | `npm run test:watch` | Tests in watch mode |
 | `npm run test:coverage` | Tests with coverage report |
 | `npm run test:lookahead` | Look-ahead bias scan (requires DB) |
@@ -479,7 +494,7 @@ npm run prisma:studio
 
 ```bash
 set -a && source .env.local && set +a
-npm run prisma:migrate    # apply pending
+npm run prisma:migrate    # apply pending (4 migrations: 001 initial, 002 content_depth, 003 pit_auditability, 004 training_sample_uniqueness)
 npm run prisma:generate   # regenerate client after schema change
 ```
 
@@ -512,7 +527,7 @@ See `docs/OPERATIONS.md` for the full variable reference.
 ## Testing
 
 ```bash
-npm test                        # full suite (464 tests)
+npm test                        # full suite (578 tests)
 npm run test:watch              # watch mode
 npm run test:coverage           # coverage report
 npm run test:lookahead          # look-ahead bias scan against live DB
@@ -543,31 +558,67 @@ See `API.md` for the full reference.
 ## Key Design Principles
 
 1. **Not a scraper.** Raw news is input. The product is structured, calibrated intelligence.
-2. **No look-ahead bias, ever.** `LookAheadGuard` validates every feature at runtime and in CI.
+2. **No look-ahead bias, ever.** `LookAheadGuard` validates `information_as_of` (not `computed_at`) against `event_timestamp` at runtime and in CI. Historical backfill is safe.
 3. **News is one factor, not a trading signal.** SentinelPulse never produces BUY/SELL/HOLD.
-4. **Full traceability.** Every TrainingSample links back to its raw article.
-5. **Source isolation.** One failing source cannot stall the pipeline.
-6. **Content depth matters.** Reuters (HEADLINE_ONLY, quality 0.25) vs ET (SUMMARY, quality 0.5) — source confidence is weighted accordingly.
+4. **Full traceability.** Every TrainingSample links back to its raw article via `GET /ml/training/samples/:id/lineage`.
+5. **Source isolation.** One failing source cannot stall the pipeline (CircuitBreaker per adapter).
+6. **Content depth matters.** Reuters (HEADLINE_ONLY, quality 0.25) vs ET (SUMMARY, quality 0.5) — source confidence is weighted: `source_reliability × 0.6 + content_quality_score × 0.4`.
+7. **Idempotent dataset generation.** `MLDatasetGenerator` uses upsert keyed on `(event_id, asset_id, prediction_timestamp, feature_version)` — calling `generate()` twice produces exactly one row (enforced at the DB level via `uq_training_sample_identity`).
+8. **Point-in-time correct labels.** `prediction_timestamp`, `feature_as_of`, and `label_bar_timestamps` are persisted with every training sample so PIT audits are fully reproducible.
 
 ---
 
 ## Documentation
 
+### Core References
+
 | Document | Description |
 |---|---|
 | `API.md` | REST API reference — all endpoints, parameters, curl examples |
+| `DEPLOYMENT.md` | Deployment guide — GitHub Actions CD, self-hosted git hook, Makefile targets |
 | `docs/ARCHITECTURE.md` | Component diagram, worker/queue topology, data flow |
-| `docs/DATA_MODEL.md` | All 23 DB tables with column documentation |
-| `docs/ML_FEATURES.md` | FeatureVector schema, 7 feature groups, formulas |
+| `docs/DATA_MODEL.md` | All DB tables with column documentation (includes migration 001–004) |
+| `docs/ML_FEATURES.md` | FeatureVector schema, 7 feature groups, formulas, PIT guarantees |
 | `docs/OPERATIONS.md` | Env var reference, scaling guide, cron schedules, retention |
 | `docs/BACKFILL.md` | Historical data backfill guide |
-| `docs/ALPHAFORGE_SENTINELPULSE_CONTRACT.md` | Phase 3A — definitive integration contract |
+| `docs/SOURCE_ADAPTERS.md` | Per-source adapter configuration and content depth |
+| `docs/TROUBLESHOOTING.md` | Failure runbooks |
+
+### Integration Contracts
+
+| Document | Description |
+|---|---|
+| `docs/ALPHAFORGE_SENTINELPULSE_CONTRACT.md` | Phase 3A — definitive AlphaForge integration contract |
+| `docs/ALPHAFORGE_INTEGRATION.md` | AlphaForge integration guide |
 | `docs/SENTINELPULSE_ML_FEATURE_CONTRACT.md` | Phase 3A — ML feature contract v1.0.0 |
-| `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` | Phase 3A — full certification report |
+| `docs/TEMPORAL_DATA_CONTRACT.md` | Phase 3B preflight — temporal/PIT data contract |
+
+### Certification Reports (latest first)
+
+| Document | Description |
+|---|---|
+| `PHASE3B2_CERTIFICATION_REPORT.md` | **Phase 3B.2** — Data-service intraday recovery; training idempotency; 3 root causes fixed; 13/13 Go/No-Go decisions; 578/578 tests |
+| `RUNTIME_60MIN_CERTIFICATION.md` | Phase 3B.1 — 60-minute runtime certification template (preconditions met; test pending) |
+| `PHASE3B_PREFLIGHT_REPORT.md` | Phase 3B preflight — 14 pre-ML checks; LookAheadGuard redesign; 2 critical bugs fixed |
+| `docs/MARKET_DATA_FINAL_CERTIFICATION.md` | Phase 3B.1 — Provider waterfall, OHLCVResponse contract, timestamp semantics |
+| `docs/HISTORICAL_REACTION_FINAL_CERTIFICATION.md` | Phase 3B.1 — RXN-G1 fix, 27 reaction tests, provider metadata |
+| `docs/TRAINING_DATASET_CERTIFICATION.md` | Phase 3B.1 — PIT dataset, prediction_timestamp, feature_as_of |
+| `docs/POINT_IN_TIME_DATASET_CERTIFICATION.md` | Phase 3B preflight — PIT SQL audit |
+| `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` | Phase 3A — full runtime certification (2026-09-15) |
 | `docs/PHASE3A_SMOKE_TEST.md` | Phase 3A — smoke test results |
 | `docs/PHASE3A_PIPELINE_METRICS.md` | Phase 3A — stage dropoff metrics |
 | `docs/PHASE3A_IMPLEMENTATION_MATRIX.md` | Phase 3A — component classification |
-| `docs/TROUBLESHOOTING.md` | Failure runbooks |
+| `docs/PHASE2_VALIDATION_REPORT.md` | Phase 2 — validation report (2026-09-15) |
+
+### Phase 3B Preflight Audit Documents
+
+| Document | Description |
+|---|---|
+| `docs/ENTITY_RESOLUTION_CERTIFICATION.md` | Entity resolution coverage audit |
+| `docs/EVENT_CLASSIFICATION_AUDIT.md` | Event classification false-negative analysis |
+| `docs/NEWS_CONTENT_QUALITY_AUDIT.md` | Content depth and quality score audit |
+| `docs/HISTORICAL_REACTION_CERTIFICATION.md` | Historical reaction engine audit (preflight version) |
+| `docs/MARKET_DATA_CERTIFICATION.md` | Market data availability audit (preflight version) |
 
 ---
 
