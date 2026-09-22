@@ -110,6 +110,10 @@ export class MLDatasetGenerator {
    *   5. Assign directional labels (Req 22.2).
    *   6. Persist to news_training_samples with provenance (Req 22.3).
    *
+   * Phase 3B.1: also persists `predictionTimestamp` (= eventTimestamp under the
+   * initial training policy), `featureAsOf` from the FeatureVector, and
+   * `labelBarTimestamp_Xm` (the exact bar used for each label).
+   *
    * Returns null when:
    *   - No FeatureVector exists for the given (eventId, assetId, featureVersion).
    *   - Baseline OHLCV is unavailable (cannot compute forward returns).
@@ -191,15 +195,35 @@ export class MLDatasetGenerator {
       LabelHorizon,
       Date | null
     >;
+    const labelBarTimestamps: Record<LabelHorizon, Date | null> = {} as Record<
+      LabelHorizon,
+      Date | null
+    >;
 
     for (const horizon of LABEL_HORIZONS) {
-      const { returnPct, cutoff } = forwardReturns[horizon];
+      const { returnPct, cutoff, barTimestamp } = forwardReturns[horizon];
       labels[horizon] = this.assignLabel(returnPct);
       labelCutoffs[horizon] = cutoff;
+      labelBarTimestamps[horizon] = barTimestamp;
     }
 
     // ------------------------------------------------------------------
-    // 6. Persist with retry (Req 22.3)
+    // 6. Determine prediction_timestamp (Phase 3B.1 Gap PT-G3)
+    //    Training policy: prediction_timestamp = event_timestamp.
+    //    This is the explicit policy for the initial dataset — AlphaForge
+    //    is assumed to generate a signal immediately when the news is published.
+    // ------------------------------------------------------------------
+    const predictionTimestamp = eventTimestamp;
+
+    // ------------------------------------------------------------------
+    // 7. Determine feature_as_of from the FeatureVector record (Phase 3B.1 Gap PT-G2)
+    //    Use featureVector.featureAsOf if present, fallback to featureVector.computedAt.
+    // ------------------------------------------------------------------
+    const featureAsOf = (featureVector as unknown as { featureAsOf: Date | null }).featureAsOf
+      ?? featureVector.computedAt;
+
+    // ------------------------------------------------------------------
+    // 8. Persist with retry (Req 22.3)
     // ------------------------------------------------------------------
     const sampleId = uuidv4();
     await this.persistWithRetry({
@@ -211,6 +235,9 @@ export class MLDatasetGenerator {
       forwardReturns,
       labels,
       labelCutoffs,
+      labelBarTimestamps,
+      predictionTimestamp,
+      featureAsOf,
     });
 
     return {
@@ -236,17 +263,17 @@ export class MLDatasetGenerator {
     const windowStart = new Date(eventTimestamp.getTime() - 60_000); // 1 minute before
 
     try {
-      const bars = await this.dataServiceClient.getOHLCV({
+      const response = await this.dataServiceClient.getOHLCV({
         assetId,
         from: windowStart,
         to: eventTimestamp,
         asOf: eventTimestamp,
       });
 
-      if (!bars || bars.length === 0) return null;
+      if (!response.bars || response.bars.length === 0) return null;
 
       // Use the last bar's close as the baseline
-      const lastBar = bars[bars.length - 1];
+      const lastBar = response.bars[response.bars.length - 1];
       return lastBar?.close ?? null;
     } catch {
       return null;
@@ -273,10 +300,10 @@ export class MLDatasetGenerator {
     assetId: string,
     eventTimestamp: Date,
     baselineClose: number,
-  ): Promise<Record<LabelHorizon, { returnPct: number | null; cutoff: Date | null }>> {
+  ): Promise<Record<LabelHorizon, { returnPct: number | null; cutoff: Date | null; barTimestamp: Date | null }>> {
     const result = {} as Record<
       LabelHorizon,
-      { returnPct: number | null; cutoff: Date | null }
+      { returnPct: number | null; cutoff: Date | null; barTimestamp: Date | null }
     >;
 
     for (const horizon of LABEL_HORIZONS) {
@@ -298,22 +325,22 @@ export class MLDatasetGenerator {
       const windowStart = new Date(cutoffTimestamp.getTime() - 60_000);
 
       try {
-        const bars = await this.dataServiceClient.getOHLCV({
+        const response = await this.dataServiceClient.getOHLCV({
           assetId,
           from: windowStart,
           to: cutoffTimestamp,
           asOf: cutoffTimestamp,
         });
 
-        if (!bars || bars.length === 0) {
+        if (!response.bars || response.bars.length === 0) {
           // OHLCV unavailable at this horizon → label = null (Req 22.1)
-          result[horizon] = { returnPct: null, cutoff: null };
+          result[horizon] = { returnPct: null, cutoff: null, barTimestamp: null };
           continue;
         }
 
-        const bar = bars[bars.length - 1];
+        const bar = response.bars[response.bars.length - 1];
         if (!bar) {
-          result[horizon] = { returnPct: null, cutoff: null };
+          result[horizon] = { returnPct: null, cutoff: null, barTimestamp: null };
           continue;
         }
 
@@ -329,12 +356,12 @@ export class MLDatasetGenerator {
 
         // Compute percentage return: (forward - baseline) / baseline * 100
         const returnPct = ((bar.close - baselineClose) / baselineClose) * 100;
-        result[horizon] = { returnPct, cutoff: cutoffTimestamp };
+        result[horizon] = { returnPct, cutoff: cutoffTimestamp, barTimestamp: bar.timestamp };
       } catch (err) {
         // Re-throw LookAheadBiasError — must not be swallowed (Req 22.4)
         if (err instanceof LookAheadBiasError) throw err;
         // Any other error (timeout, 5xx, etc.) → treat as unavailable
-        result[horizon] = { returnPct: null, cutoff: null };
+        result[horizon] = { returnPct: null, cutoff: null, barTimestamp: null };
       }
     }
 
@@ -399,6 +426,9 @@ export class MLDatasetGenerator {
    * Persists a TrainingSample to news_training_samples, retrying up to 3×
    * at 1-second intervals on storage failure (Req 22.3).
    *
+   * Phase 3B.1: also persists predictionTimestamp, featureAsOf, and
+   * labelBarTimestamp_Xm columns added by migration 003.
+   *
    * Throws the underlying error if all attempts are exhausted.
    */
   private async persistWithRetry(sample: {
@@ -407,54 +437,91 @@ export class MLDatasetGenerator {
     assetId: string;
     articleIds: string[];
     featureVectorId: string;
-    forwardReturns: Record<LabelHorizon, { returnPct: number | null; cutoff: Date | null }>;
+    forwardReturns: Record<LabelHorizon, { returnPct: number | null; cutoff: Date | null; barTimestamp: Date | null }>;
     labels: Record<LabelHorizon, DirectionalLabel | null>;
     labelCutoffs: Record<LabelHorizon, Date | null>;
+    labelBarTimestamps: Record<LabelHorizon, Date | null>;
+    predictionTimestamp: Date;
+    featureAsOf: Date;
   }): Promise<void> {
     const MAX_RETRIES = 3;
     const RETRY_DELAY_MS = 1_000;
-
     let lastError: unknown;
+
+    // Build the full data payload once — shared between create and update paths.
+    // Phase 3B.2 §17: uses upsert keyed on the canonical uniqueness tuple
+    // (eventId, assetId, predictionTimestamp, featureVersion) so that repeated
+    // calls for the same pilot window produce exactly one persisted row.
+    const sampleData = {
+      articleIds: sample.articleIds,
+      featureVectorId: sample.featureVectorId,
+      // Forward return values (raw percentages)
+      futureReturn5m: sample.forwardReturns['5m'].returnPct,
+      futureReturn15m: sample.forwardReturns['15m'].returnPct,
+      futureReturn30m: sample.forwardReturns['30m'].returnPct,
+      futureReturn1h: sample.forwardReturns['1h'].returnPct,
+      futureReturn4h: sample.forwardReturns['4h'].returnPct,
+      futureReturn1d: sample.forwardReturns['1d'].returnPct,
+      // Directional labels
+      label5m: sample.labels['5m'],
+      label15m: sample.labels['15m'],
+      label30m: sample.labels['30m'],
+      label1h: sample.labels['1h'],
+      label4h: sample.labels['4h'],
+      label1d: sample.labels['1d'],
+      // Label cutoff timestamps
+      labelCutoff5m: sample.labelCutoffs['5m'],
+      labelCutoff15m: sample.labelCutoffs['15m'],
+      labelCutoff30m: sample.labelCutoffs['30m'],
+      labelCutoff1h: sample.labelCutoffs['1h'],
+      labelCutoff4h: sample.labelCutoffs['4h'],
+      labelCutoff1d: sample.labelCutoffs['1d'],
+      // Phase 3B.1 (Gap PT-G5): exact bar timestamps used for each label
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({
+        labelBarTimestamp5m:  sample.labelBarTimestamps['5m'],
+        labelBarTimestamp15m: sample.labelBarTimestamps['15m'],
+        labelBarTimestamp30m: sample.labelBarTimestamps['30m'],
+        labelBarTimestamp1h:  sample.labelBarTimestamps['1h'],
+        labelBarTimestamp4h:  sample.labelBarTimestamps['4h'],
+        labelBarTimestamp1d:  sample.labelBarTimestamps['1d'],
+      } as any),
+      // Provenance fields (Req 22.3)
+      featureVersion: this.featureVersion,
+      pipelineVersion: this.pipelineVersion,
+      marketDataSnapshotVersion: this.marketDataSnapshotVersion,
+      modelVersion: this.modelVersion,
+    };
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        await prisma.newsTrainingSample.create({
-          data: {
+        // Phase 3B.2 §17: upsert on the canonical identity key so that
+        // generate() is idempotent — calling it twice for the same event/asset
+        // produces exactly one row, not two.
+        // The where clause matches the @@unique constraint added in migration 004.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (prisma.newsTrainingSample as any).upsert({
+          where: {
+            uq_training_sample_identity: {
+              eventId:             sample.eventId,
+              assetId:             sample.assetId,
+              predictionTimestamp: sample.predictionTimestamp,
+              featureVersion:      this.featureVersion,
+            },
+          },
+          create: {
             id: sample.id,
             eventId: sample.eventId,
             assetId: sample.assetId,
-            articleIds: sample.articleIds,
-            featureVectorId: sample.featureVectorId,
-
-            // Forward return values (raw percentages)
-            futureReturn5m: sample.forwardReturns['5m'].returnPct,
-            futureReturn15m: sample.forwardReturns['15m'].returnPct,
-            futureReturn30m: sample.forwardReturns['30m'].returnPct,
-            futureReturn1h: sample.forwardReturns['1h'].returnPct,
-            futureReturn4h: sample.forwardReturns['4h'].returnPct,
-            futureReturn1d: sample.forwardReturns['1d'].returnPct,
-
-            // Directional labels
-            label5m: sample.labels['5m'],
-            label15m: sample.labels['15m'],
-            label30m: sample.labels['30m'],
-            label1h: sample.labels['1h'],
-            label4h: sample.labels['4h'],
-            label1d: sample.labels['1d'],
-
-            // Label cutoff timestamps
-            labelCutoff5m: sample.labelCutoffs['5m'],
-            labelCutoff15m: sample.labelCutoffs['15m'],
-            labelCutoff30m: sample.labelCutoffs['30m'],
-            labelCutoff1h: sample.labelCutoffs['1h'],
-            labelCutoff4h: sample.labelCutoffs['4h'],
-            labelCutoff1d: sample.labelCutoffs['1d'],
-
-            // Provenance fields (Req 22.3)
-            featureVersion: this.featureVersion,
-            pipelineVersion: this.pipelineVersion,
-            marketDataSnapshotVersion: this.marketDataSnapshotVersion,
-            modelVersion: this.modelVersion,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ...({ predictionTimestamp: sample.predictionTimestamp } as any),
+            ...sampleData,
+          },
+          update: {
+            // On conflict: refresh all mutable fields (labels, returns, cutoffs).
+            // Identity fields (eventId, assetId, predictionTimestamp, featureVersion)
+            // remain immutable once written.
+            ...sampleData,
           },
         });
         return; // success
@@ -465,7 +532,6 @@ export class MLDatasetGenerator {
         }
       }
     }
-
     // All retries exhausted
     throw lastError;
   }

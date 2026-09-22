@@ -416,7 +416,7 @@ export class BackfillEngine {
               jobId,
               articleId: article.id,
               offendingFeature: err.offendingFeature,
-              recordTimestamp: err.recordTimestamp,
+              informationAsOf: err.informationAsOf,
               eventTimestamp: err.eventTimestamp,
             },
             'LookAheadBiasError — article skipped during backfill',

@@ -1,0 +1,171 @@
+# =============================================================================
+# SentinelPulse — Continuous Deployment
+#
+# Triggers on every push to `main` or `develop` (after CI passes).
+# SSHes into the deployment server and runs ./deploy.sh --no-pull.
+#
+# Required GitHub repository secrets:
+#   DEPLOY_HOST        — IP or hostname of the server (e.g. 1.2.3.4)
+#   DEPLOY_USER        — SSH user on the server     (e.g. ubuntu)
+#   DEPLOY_SSH_KEY     — Private SSH key (PEM/OpenSSH) with server access
+#   DEPLOY_PATH        — Absolute path to the repo on the server
+#                        (e.g. /home/ubuntu/SentinelPulse)
+#   ENV_FILE_CONTENTS  — Full contents of .env.local on the server
+#                        (the script writes this to $DEPLOY_PATH/.env.local
+#                         before running deploy.sh so secrets stay in GitHub
+#                         and are never baked into the image)
+#
+# Optional secrets (used only when SLACK_WEBHOOK_URL is set):
+#   SLACK_WEBHOOK_URL  — Incoming webhook URL for deploy notifications
+#
+# Branch strategy:
+#   push → main     → deploys to PRODUCTION server
+#   push → develop  → deploys to STAGING server
+#   (Use separate secret sets per environment, or a single server for both.)
+# =============================================================================
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+  # Allow manual redeploy from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy"
+        required: true
+        default: "main"
+
+# Prevent concurrent deploys — queue them instead
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. CI must pass first ───────────────────────────────────────────────────
+  # Re-uses the existing ci.yml build-and-test job by calling it as a required
+  # status check. If your branch protection rules already enforce the CI check
+  # you can remove the `needs` block below.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # ── 2. Deploy ───────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to server (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: ci
+    timeout-minutes: 20
+
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      url: ${{ github.ref_name == 'main' && 'http://localhost:3001/health' || 'http://localhost:3001/health' }}
+
+    steps:
+      # ── Checkout (needed for git metadata only, not sent to server) ──────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Set up SSH ────────────────────────────────────────────────────────
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # ── Write .env.local to server (secrets never baked into image) ──────
+      - name: Write env file on server
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cat > ${{ secrets.DEPLOY_PATH }}/.env.local" \
+          <<'EOF'
+          ${{ secrets.ENV_FILE_CONTENTS }}
+          EOF
+
+      # ── Pull latest code on server ────────────────────────────────────────
+      - name: Pull latest code on server
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd ${{ secrets.DEPLOY_PATH }} && git fetch origin && git checkout ${{ github.ref_name }} && git reset --hard origin/${{ github.ref_name }}"
+
+      # ── Run deploy script on server ───────────────────────────────────────
+      - name: Run deploy.sh
+        id: deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd ${{ secrets.DEPLOY_PATH }} && bash deploy.sh --no-pull --env-file .env.local"
+
+      # ── Verify API health from CI runner (optional external check) ────────
+      - name: Verify API health (external)
+        if: steps.deploy.outcome == 'success'
+        run: |
+          echo "Checking API health via SSH tunnel..."
+          # Tunnel port 3001 from server to localhost so we can curl it here
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -o ExitOnForwardFailure=yes \
+              -fNL 13001:localhost:3001 \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" &
+          SSH_PID=$!
+
+          sleep 3
+          RESP=$(curl -sf --max-time 10 http://localhost:13001/health || echo "FAIL")
+          kill $SSH_PID 2>/dev/null || true
+
+          if [[ "$RESP" == "FAIL" ]]; then
+            echo "::error::API health check via SSH tunnel failed after deploy"
+            exit 1
+          fi
+          echo "API health check passed: $RESP"
+
+      # ── Notify Slack on success ───────────────────────────────────────────
+      - name: Notify Slack — success
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "✅ *SentinelPulse deployed successfully*",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "Branch",  "value": "${{ github.ref_name }}", "short": true},
+                  {"title": "Commit",  "value": "${{ github.sha }}", "short": true},
+                  {"title": "Author",  "value": "${{ github.actor }}", "short": true},
+                  {"title": "Message", "value": "${{ github.event.head_commit.message }}", "short": false}
+                ]
+              }]
+            }'
+
+      # ── Notify Slack on failure ───────────────────────────────────────────
+      - name: Notify Slack — failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🚨 *SentinelPulse deploy FAILED*",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {"title": "Branch",  "value": "${{ github.ref_name }}", "short": true},
+                  {"title": "Commit",  "value": "${{ github.sha }}", "short": true},
+                  {"title": "Author",  "value": "${{ github.actor }}", "short": true},
+                  {"title": "Run URL", "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false}
+                ]
+              }]
+            }'

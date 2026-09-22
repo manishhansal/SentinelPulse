@@ -386,23 +386,27 @@ model NewsMarketImpact {
 // Observed price/volume/volatility changes following past events.
 // =============================================================================
 model NewsMarketReaction {
-  id                         String   @id @default(uuid()) @db.Uuid
-  eventId                    String   @map("event_id") @db.Uuid
-  assetId                    String   @map("asset_id")
-  return1m                   Float?   @map("return_1m")
-  return5m                   Float?   @map("return_5m")
-  return15m                  Float?   @map("return_15m")
-  return30m                  Float?   @map("return_30m")
-  return1h                   Float?   @map("return_1h")
-  return4h                   Float?   @map("return_4h")
-  return1d                   Float?   @map("return_1d")
-  volumeChangeRatio          Float?   @map("volume_change_ratio")
-  volatilityChangeRatio      Float?   @map("volatility_change_ratio")
-  highImpactFlag             Boolean  @default(false) @map("high_impact_flag")
-  marketOpen                 Boolean  @default(true) @map("market_open")
-  dataServiceTimeout         Boolean  @default(false) @map("data_service_timeout")
-  dataServiceSnapshotVersion String?  @map("data_service_snapshot_version")
-  computedAt                 DateTime @default(now()) @map("computed_at") @db.Timestamptz
+  id                         String    @id @default(uuid()) @db.Uuid
+  eventId                    String    @map("event_id") @db.Uuid
+  assetId                    String    @map("asset_id")
+  return1m                   Float?    @map("return_1m")
+  return5m                   Float?    @map("return_5m")
+  return15m                  Float?    @map("return_15m")
+  return30m                  Float?    @map("return_30m")
+  return1h                   Float?    @map("return_1h")
+  return4h                   Float?    @map("return_4h")
+  return1d                   Float?    @map("return_1d")
+  volumeChangeRatio          Float?    @map("volume_change_ratio")
+  volatilityChangeRatio      Float?    @map("volatility_change_ratio")
+  highImpactFlag             Boolean   @default(false) @map("high_impact_flag")
+  marketOpen                 Boolean   @default(true) @map("market_open")
+  dataServiceTimeout         Boolean   @default(false) @map("data_service_timeout")
+  dataServiceSnapshotVersion String?   @map("data_service_snapshot_version")
+  /// Phase 3B.1: start of the earliest query window (event_timestamp - 15m).
+  reactionWindowStart        DateTime? @map("reaction_window_start") @db.Timestamptz
+  /// Phase 3B.1: end of the latest query window (event_timestamp + 1d).
+  reactionWindowEnd          DateTime? @map("reaction_window_end") @db.Timestamptz
+  computedAt                 DateTime  @default(now()) @map("computed_at") @db.Timestamptz
 
   // Relations
   event NewsEvent @relation(fields: [eventId], references: [id])
@@ -436,20 +440,27 @@ model NewsMarketRegime {
 // Idempotency key: (event_id, asset_id, feature_version)
 // =============================================================================
 model NewsFeature {
-  id              String   @id @default(uuid()) @db.Uuid
-  eventId         String?  @map("event_id") @db.Uuid
-  assetId         String?  @map("asset_id")
-  entityType      String?  @map("entity_type") // "article" | "VELOCITY" | "BREADTH" | ...
-  entityId        String?  @map("entity_id")
-  featureType     String   @map("feature_type")
-  featureVector   Json?    @map("feature_vector") // JSONB
-  window          String? // "1m" | "5m" (for velocity)
+  id              String    @id @default(uuid()) @db.Uuid
+  eventId         String?   @map("event_id") @db.Uuid
+  assetId         String?   @map("asset_id")
+  entityType      String?   @map("entity_type") // "article" | "VELOCITY" | "BREADTH" | ...
+  entityId        String?   @map("entity_id")
+  featureType     String    @map("feature_type")
+  featureVector   Json?     @map("feature_vector") // JSONB
+  window          String?   // "1m" | "5m" (for velocity)
   value           Float?
   baseline        Float?
   momentum        Float?
-  featureVersion  String   @map("feature_version")
-  pipelineVersion String   @map("pipeline_version")
-  computedAt      DateTime @default(now()) @map("computed_at") @db.Timestamptz
+  featureVersion  String    @map("feature_version")
+  pipelineVersion String    @map("pipeline_version")
+  /// Phase 3B.1 (Gap PT-G2): the latest information timestamp across all data
+  /// sources contributing to this feature vector.
+  ///   - Text-derived features: article.published_at
+  ///   - Market-data features:  bar.timestamp (bar open time)
+  /// MUST be <= prediction_timestamp.
+  /// Distinct from computed_at (wall-clock when engine ran) — see TEMPORAL_DATA_CONTRACT.md.
+  featureAsOf     DateTime? @map("feature_as_of") @db.Timestamptz
+  computedAt      DateTime  @default(now()) @map("computed_at") @db.Timestamptz
 
   // Relations
   event           NewsEvent?           @relation(fields: [eventId], references: [id])
@@ -461,6 +472,7 @@ model NewsFeature {
   @@index([eventId])
   @@index([assetId, computedAt(sort: Desc)])
   @@index([featureType, entityId, computedAt(sort: Desc)])
+  @@index([featureAsOf(sort: Desc)])
   @@map("news_features")
 }
 
@@ -492,6 +504,10 @@ model NewsTrainingSample {
   assetId                   String    @map("asset_id")
   articleIds                String[]  @map("article_ids")
   featureVectorId           String    @map("feature_vector_id") @db.Uuid
+  /// Phase 3B.1 (Gap PT-G3): the moment at which AlphaForge generates a signal.
+  /// Initial training policy: prediction_timestamp = event_timestamp.
+  /// INVARIANT: feature_as_of <= prediction_timestamp < label_cutoff_X.
+  predictionTimestamp       DateTime? @map("prediction_timestamp") @db.Timestamptz
   futureReturn5m            Float?    @map("future_return_5m")
   futureReturn15m           Float?    @map("future_return_15m")
   futureReturn30m           Float?    @map("future_return_30m")
@@ -510,6 +526,14 @@ model NewsTrainingSample {
   labelCutoff1h             DateTime? @map("label_cutoff_1h") @db.Timestamptz
   labelCutoff4h             DateTime? @map("label_cutoff_4h") @db.Timestamptz
   labelCutoff1d             DateTime? @map("label_cutoff_1d") @db.Timestamptz
+  /// Phase 3B.1 (Gap PT-G5): exact bar timestamps used to compute each label.
+  /// INVARIANT: label_bar_timestamp_Xm <= label_cutoff_Xm
+  labelBarTimestamp5m       DateTime? @map("label_bar_timestamp_5m") @db.Timestamptz
+  labelBarTimestamp15m      DateTime? @map("label_bar_timestamp_15m") @db.Timestamptz
+  labelBarTimestamp30m      DateTime? @map("label_bar_timestamp_30m") @db.Timestamptz
+  labelBarTimestamp1h       DateTime? @map("label_bar_timestamp_1h") @db.Timestamptz
+  labelBarTimestamp4h       DateTime? @map("label_bar_timestamp_4h") @db.Timestamptz
+  labelBarTimestamp1d       DateTime? @map("label_bar_timestamp_1d") @db.Timestamptz
   featureVersion            String    @map("feature_version")
   pipelineVersion           String    @map("pipeline_version")
   marketDataSnapshotVersion String    @map("market_data_snapshot_version")
@@ -520,8 +544,10 @@ model NewsTrainingSample {
   event         NewsEvent   @relation(fields: [eventId], references: [id])
   featureVector NewsFeature @relation(fields: [featureVectorId], references: [id])
 
+  @@unique([eventId, assetId, predictionTimestamp, featureVersion], name: "uq_training_sample_identity")
   @@index([eventId, assetId, featureVersion])
   @@index([assetId, createdAt(sort: Desc)])
+  @@index([predictionTimestamp(sort: Desc)])
   @@map("news_training_samples")
 }
 
