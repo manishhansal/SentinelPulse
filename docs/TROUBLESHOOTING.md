@@ -30,7 +30,7 @@ A Tier-1 outage reduces news coverage but does not stop the pipeline for other s
 1. **Identify the failing source**:
    ```bash
    curl -H "Authorization: Bearer $SENTINEL_API_KEY" \
-     http://localhost:3000/api/v1/admin/sources \
+     http://localhost:3001/api/v1/admin/sources \
      | jq '.data.sources[] | select(.health == false)'
    ```
 
@@ -133,7 +133,7 @@ Two separate Redis concerns:
 3. **Check SentinelPulse feature worker errors**:
    ```bash
    curl -H "Authorization: Bearer $SENTINEL_API_KEY" \
-     http://localhost:3000/api/v1/admin/ingestion \
+     http://localhost:3001/api/v1/admin/ingestion \
      | jq '.data.errors[] | select(.stage == "feature")'
    ```
 
@@ -146,7 +146,7 @@ Two separate Redis concerns:
      curl -X POST -H "Authorization: Bearer $SENTINEL_API_KEY" \
        -H "Content-Type: application/json" \
        -d '{"startDate":"<outage_start>","endDate":"<outage_end>","sources":["reuters","moneycontrol","economictimes"],"batchSize":50}' \
-       http://localhost:3000/api/v1/admin/backfill
+       http://localhost:3001/api/v1/admin/backfill
      ```
 
 6. **If timeouts are chronic**: Consider increasing the data-service timeout (it is currently hardcoded at 10 seconds per request). Alternatively, reduce `WORKER_FEATURE_CONCURRENCY` to reduce concurrent load on data-service.
@@ -205,7 +205,7 @@ Jobs in the DLQ are preserved and not lost. However, they represent articles or 
 1. **Identify which DLQ is accumulating**:
    ```bash
    curl -H "Authorization: Bearer $SENTINEL_API_KEY" \
-     http://localhost:3000/api/v1/admin/queues \
+     http://localhost:3001/api/v1/admin/queues \
      | jq '.data.queues[] | select(.dlq_count > 0)'
    ```
 
@@ -264,7 +264,7 @@ Jobs in the DLQ are preserved and not lost. However, they represent articles or 
 2. **Check the `news.embeddings` queue depth**:
    ```bash
    curl -H "Authorization: Bearer $SENTINEL_API_KEY" \
-     http://localhost:3000/api/v1/admin/queues \
+     http://localhost:3001/api/v1/admin/queues \
      | jq '.data.queues[] | select(.name == "news.embeddings")'
    ```
 

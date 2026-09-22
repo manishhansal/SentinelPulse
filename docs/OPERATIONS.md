@@ -106,7 +106,7 @@ Each worker's concurrency is independently configurable. If a variable is absent
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NODE_ENV` | `development` | `development`, `test`, or `production` |
-| `PORT` | `3000` | HTTP server port |
+| `PORT` | `3001` | HTTP server port. **AlphaForge occupies port 3000 — always use 3001 for SentinelPulse.** |
 | `LOG_LEVEL` | `info` | pino log level: `debug`, `info`, `warn`, `error` |
 
 ---
@@ -123,7 +123,7 @@ Workers are stateless and can be scaled horizontally. Each worker instance conne
 
 To check current queue depths:
 ```bash
-curl -H "Authorization: Bearer $SENTINEL_API_KEY" http://localhost:3000/api/v1/admin/queues
+curl -H "Authorization: Bearer $SENTINEL_API_KEY" http://localhost:3001/api/v1/admin/queues
 ```
 
 ---
@@ -177,7 +177,7 @@ Each source has an isolated circuit breaker. States:
 
 To check current circuit breaker states:
 ```bash
-curl -H "Authorization: Bearer $SENTINEL_API_KEY" http://localhost:3000/api/v1/admin/sources
+curl -H "Authorization: Bearer $SENTINEL_API_KEY" http://localhost:3001/api/v1/admin/sources
 ```
 
 Look at the `cb_state` field for each source.
@@ -323,3 +323,96 @@ To enable embeddings, add a valid OpenAI API key:
 ```
 EMBEDDING_API_KEY=sk-...
 ```
+
+---
+
+## Phase 3B.1 Changes (2026-09-17)
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATA_SERVICE_BACKFILL_FORCE` | `false` | When `true`, passes `force=true` on all backfill requests to data-service, clearing Redis checkpoints before fetching. Use when a checkpoint is stale or blocking a valid date range. |
+
+### Schema Migrations Applied
+
+Run after pulling Phase 3B.1:
+```bash
+set -a && source .env.local && set +a
+npm run prisma:migrate   # applies migration 003_pit_auditability
+npm run prisma:generate
+```
+
+Migration 003 adds `feature_as_of` to `news_features` and `prediction_timestamp` + `label_bar_timestamp_*` to `news_training_samples`. Both columns are nullable — existing rows are unaffected.
+
+### `return_1m` Semantic Note
+
+`return_1m` in `news_market_reactions` is not a genuine 1-minute return. It maps to the first available 5m candle at T+1m (Option C policy — see `docs/ML_FEATURES.md`). This is intentional and documented. Do not attempt to replace it with 1m OHLCV data — Angel One does not consistently expose 1m historical data for all instruments.
+
+---
+
+## Phase 3B.2 Changes (2026-09-18)
+
+### New data-service Configuration Requirements
+
+Phase 3B.2 identified that Upstox credentials must be present in the **data-service Docker environment** (not just `.env.local`). Ensure `data-service2.0/docker-compose.yml` includes:
+
+```yaml
+environment:
+  UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+  UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
+```
+
+For all three service definitions (api, worker, scheduler). Without these, all IDX instruments (NIFTY, BANKNIFTY) return 0 bars for all intervals.
+
+### Schema Migrations Applied
+
+Run after pulling Phase 3B.2:
+```bash
+set -a && source .env.local && set +a
+npm run prisma:migrate   # applies migration 004_training_sample_uniqueness
+npm run prisma:generate
+```
+
+Migration 004 first DELETEs duplicate training sample rows (if any), then adds `uq_training_sample_identity UNIQUE(event_id, asset_id, prediction_timestamp, feature_version)`. Safe to run on empty or populated tables.
+
+### Pilot Reaction Test
+
+```bash
+DATA_SERVICE_URL=http://localhost:8200 \
+DATA_SERVICE_API_KEY=<key> \
+ALLOWED_SOURCE_DOMAINS=localhost,... \
+DATABASE_URL=<connection-string> \
+npx tsx src/scripts/pilot-reaction-test.ts
+```
+
+Expected output: 37/40 daily sessions (3 missing = weekends), 115/120 intraday sessions, 0 errors.
+
+### Provider Waterfall Verification
+
+To confirm all three providers are reachable after the RC-1/RC-2/RC-3 fixes:
+
+```bash
+# Angel One (EQ primary) — expect 73+ bars
+curl "http://localhost:8200/v1/india/historical?symbol=RELIANCE&interval=5m&from=2026-09-10&to=2026-09-12" \
+  -H "Authorization: Bearer $DATA_SERVICE_API_KEY"
+
+# Upstox (IDX primary) — expect 150 bars; was 0 before Phase 3B.2
+curl "http://localhost:8200/v1/india/historical?symbol=NIFTY&interval=5m&from=2026-09-10&to=2026-09-12" \
+  -H "Authorization: Bearer $DATA_SERVICE_API_KEY"
+
+# Yahoo Finance (1d fallback)
+curl "http://localhost:8200/v1/india/historical?symbol=TCS&interval=1d&from=2024-01-08&to=2024-01-14&force_provider=yahoo_finance" \
+  -H "Authorization: Bearer $DATA_SERVICE_API_KEY"
+```
+
+Verify `metadata.provider` in each response matches expectations.
+
+### Outstanding Items Before Phase 3B.3
+
+| Priority | Action |
+|---|---|
+| MUST | Rebuild data-service Docker image — current fixes were applied via `docker cp` and will revert on container restart |
+| MUST | Run Jan 2024 news ingestion to populate `news_events` for the pilot window (2024-01-08 to 2024-01-14) |
+| SHOULD | Fill SBIN 5m Jan 2024 gap: `fire_backfill("SBIN", "NSE", "5m", "2024-01-08", "2024-01-14", "EQ", force=True)` |
+| SHOULD | Complete 60-minute runtime test: `npx tsx src/scripts/runtime-60min-test.ts` |

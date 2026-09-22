@@ -292,3 +292,114 @@ MarketRegimeEngine.updateMarket()
 ```
 
 *Updated: Phase 3A Runtime Certification — 2026-09-15*
+
+---
+
+## Phase 3B.1 Architecture Changes
+
+*Updated: Phase 3B.1 Certification — 2026-09-17*
+
+### Fixes Applied
+
+| Component | Fix | Commit |
+|---|---|---|
+| `HistoricalReactionEngine.ts` | **RXN-G1**: `intervalForOffset()` now returns `'5m'` for all intraday offsets and `'1d'` for `plus1d`. Previously the engine passed `'1d'` for every offset, producing 0 intraday reactions. | `e651240` |
+| `DataServiceClient.ts` | **MKT-BUG-1**: `candle.time * 1000` (epoch ms) replaces `candle.datetime` (undefined string). `OHLCVResponse` envelope now surfaced with `metadata.provider`, `metadata.dataAsOf`, `metadata.quality`. | `41edb0a` |
+| `LookAheadGuard.ts` (preflight) | Redesigned to validate `information_as_of` not `computed_at`. | `b82bea2` |
+| `DataServiceClient.ts` (preflight) | OHLCV bar timestamp field: `candle.time` (epoch seconds) replaces `candle.datetime`. | `c25eae5` |
+
+### New Schema Fields (Migration 003)
+
+Migration `003_pit_auditability` adds three columns to `news_features` and `news_training_samples`:
+
+| Table | Column | Type | Purpose |
+|---|---|---|---|
+| `news_features` | `feature_as_of` | `TIMESTAMPTZ` | Latest information timestamp across all data sources for this vector (PIT audit) |
+| `news_training_samples` | `prediction_timestamp` | `TIMESTAMPTZ` | Moment at which AlphaForge would generate a signal using these features |
+| `news_training_samples` | `label_bar_timestamp_5m` | `TIMESTAMPTZ` | Open time of the 5m bar used for the `return_5m` label |
+| `news_training_samples` | `label_bar_timestamp_15m` | `TIMESTAMPTZ` | Open time of the 15m bar used for the `return_15m` label |
+| `news_training_samples` | `label_bar_timestamp_1h` | `TIMESTAMPTZ` | Open time of the 1h bar used for the `return_1h` label |
+| `news_training_samples` | `label_bar_timestamp_1d` | `TIMESTAMPTZ` | Open time of the 1d bar used for the `return_1d` label |
+
+**PIT invariant enforced in code:**
+```
+feature_as_of  <=  prediction_timestamp  <  label_cutoff_Xm  <=  label_bar_timestamp_Xm
+```
+
+### `MLDatasetGenerator` Changes
+
+`MLDatasetGenerator.persistWithRetry()` now persists:
+- `predictionTimestamp` — set to `eventTimestamp` (initial policy)
+- `featureAsOf` — passed from `FeatureEngineeringEngine`
+- `labelBarTimestamp5m/15m/1h/1d` — the `bar.open_time` of the candle used for each forward-return label
+
+---
+
+## Phase 3B.2 Architecture Changes
+
+*Updated: Phase 3B.2 Certification — 2026-09-18*
+
+### Root Causes Fixed (data-service side)
+
+Three independent root causes were identified and fixed in `data-service2.0`:
+
+| ID | Root Cause | Fix Location |
+|---|---|---|
+| RC-1 | Upstox candle key mismatch: adapter returns `"timestamp"`, engine reads `"time"` → all IDX bars silently discarded | `data-service2.0/src/engines/historical_engine.py` — key normalisation in `_fetch_candles()` |
+| RC-2 | Redis checkpoint blocked historical backfill: checkpoint at 2026-09-16 advanced `from_ts` past Jan 2024 `to_ts` → 0 bars | `data-service2.0/src/api/india.py` — added `force: bool` + `clear_checkpoint()` method |
+| RC-3 | Upstox tokens missing from Docker container env → `upstox_adapter = None` for all workers | `data-service2.0/docker-compose.yml` — added `UPSTOX_ACCESS_TOKEN` + `UPSTOX_ANALYTICS_KEY` to all service definitions |
+
+### `pilot-reaction-test.ts` Date Truncation Fix
+
+`DataServiceClient.getOHLCV()` truncates both `from` and `to` to `YYYY-MM-DD`. When `from = to = "2024-01-08"`, data-service returns HTTP 400. Fix: `to = next calendar day`, `asOf = next day +10:15 UTC`.
+
+### New Schema: Migration 004 — Training Sample Uniqueness
+
+Migration `004_training_sample_uniqueness` adds a database-level unique constraint:
+
+```sql
+ALTER TABLE news_training_samples
+    ADD CONSTRAINT uq_training_sample_identity
+    UNIQUE (event_id, asset_id, prediction_timestamp, feature_version);
+```
+
+A deduplication `DELETE` runs before `ADD CONSTRAINT` so it applies cleanly to existing rows.
+
+**Prisma model change:**
+```prisma
+@@unique([eventId, assetId, predictionTimestamp, featureVersion], name: "uq_training_sample_identity")
+```
+
+### `MLDatasetGenerator` — Idempotent Upsert
+
+`prisma.newsTrainingSample.create()` replaced with `.upsert()` keyed on `uq_training_sample_identity`:
+
+```typescript
+await (prisma.newsTrainingSample as any).upsert({
+  where: { uq_training_sample_identity: { eventId, assetId, predictionTimestamp, featureVersion } },
+  create: { id: sample.id, eventId, assetId, ...sampleData },
+  update: { ...sampleData },  // identity fields immutable once written
+});
+```
+
+Calling `generate()` twice for the same (event, asset) pair now produces exactly one row.
+
+### Schema Migrations Summary
+
+| Migration | Description | Phase |
+|---|---|---|
+| `001_initial_schema` | Full initial schema (23 tables, pgvector HNSW index) | Initial |
+| `002_content_depth_freshness` | `content_depth`, `content_quality_score`, `freshness_state` columns | Phase 3A |
+| `003_pit_auditability` | `feature_as_of`, `prediction_timestamp`, `label_bar_timestamps` | Phase 3B.1 |
+| `004_training_sample_uniqueness` | `uq_training_sample_identity` unique constraint + dedup | Phase 3B.2 |
+
+### Provider Waterfall (Certified Phase 3B.2)
+
+```
+Angel One SmartAPI (EQ primary)  → RELIANCE/TCS/HDFCBANK/ICICIBANK/SBIN/INFY  all intervals
+Upstox V3 (IDX primary)          → NIFTY/BANKNIFTY  all intervals (was broken until RC-1/RC-3 fix)
+Yahoo Finance (1d fallback)       → EQ/IDX 1d when Angel One/Upstox return empty
+null / empty                      → no synthetic data (guaranteed)
+```
+
+`force_provider` parameter on `BackfillRequest` enables explicit provider selection for testing and backfill operations.

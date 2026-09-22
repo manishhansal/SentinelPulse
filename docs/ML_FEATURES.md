@@ -214,3 +214,137 @@ In Phase 3A, the LookAheadGuard correctly blocked feature generation for article
 For historical backfill (Phase 3B), the sentiment pipeline must use the article's original `publishedAt` as the computation anchor, not `new Date()`. Otherwise the guard will block all historical feature generation.
 
 **Look-ahead violations in Phase 3A:** 0 (CI check confirmed)
+
+---
+
+## Phase 3B.1: PIT Auditability Fields
+
+*Added in migration `003_pit_auditability` (Phase 3B.1, 2026-09-17)*
+
+### LookAheadGuard Redesign
+
+`LookAheadGuard` was fully redesigned to validate `information_as_of` (the underlying data timestamp) instead of `computed_at` (when the engine ran). This makes historical backfill safe — articles processed in 2026 for a 2024 event will pass the guard provided the data used was available at the time of the event.
+
+**New `FeatureSource` interface:**
+```typescript
+interface FeatureSource {
+  informationAsOf: Date;  // latest data timestamp, NOT computed_at
+  value: unknown;
+}
+```
+
+**Correct invariant enforced:**
+```
+feature_as_of (= article.published_at for text features)  <=  event_timestamp
+```
+
+`FeatureEngineeringEngine` fetches `article.published_at` and passes it as `informationAsOf` for all text-derived features. Market data features use the bar's open timestamp as `informationAsOf`.
+
+**Test coverage:** 53 new unit tests + 3 property tests covering cases A–F of the temporal contract. 79/79 pass.
+
+---
+
+### New `news_features` Column: `feature_as_of`
+
+| Column | Type | Description |
+|---|---|---|
+| `feature_as_of` | `TIMESTAMPTZ` | The latest `information_as_of` across all data sources contributing to this feature vector. For text features: `article.published_at`. For market-data features: `bar.open_time`. **Must be `<= prediction_timestamp`.** Distinct from `computed_at` (wall-clock when engine ran). |
+
+This column is the audit trail for PIT correctness. Every feature vector now carries both:
+- `computed_at` — when the engine ran (irrelevant to PIT correctness)
+- `feature_as_of` — what data was available (the real PIT anchor)
+
+SQL PIT audit query (zero violations expected):
+```sql
+SELECT COUNT(*) AS violations
+FROM news_features f
+JOIN news_events e ON e.id = f.event_id
+WHERE f.feature_as_of > e.event_timestamp;
+```
+
+---
+
+### New `news_training_samples` Columns
+
+| Column | Type | Description |
+|---|---|---|
+| `prediction_timestamp` | `TIMESTAMPTZ` | The moment at which AlphaForge would generate a signal using the features in this sample. Initial policy: `prediction_timestamp = event_timestamp`. **Invariant: `feature_as_of <= prediction_timestamp < label_cutoff_X`.** |
+| `label_bar_timestamp_5m` | `TIMESTAMPTZ` | Open time of the 5m OHLCV bar used to compute `future_return_5m`. |
+| `label_bar_timestamp_15m` | `TIMESTAMPTZ` | Open time of the 15m bar for `future_return_15m`. |
+| `label_bar_timestamp_1h` | `TIMESTAMPTZ` | Open time of the 1h bar for `future_return_1h`. |
+| `label_bar_timestamp_1d` | `TIMESTAMPTZ` | Open time of the 1d bar for `future_return_1d`. |
+
+**Full PIT ordering invariant:**
+```
+feature_as_of  <=  prediction_timestamp  <  label_cutoff_Xm  <=  label_bar_timestamp_Xm
+```
+
+PIT SQL checks (all 6 must return 0 violations before any training run):
+```sql
+-- 1. feature_as_of must not exceed prediction_timestamp
+SELECT COUNT(*) FROM news_training_samples s
+JOIN news_features f ON f.id = s.feature_vector_id
+WHERE f.feature_as_of > s.prediction_timestamp;
+
+-- 2. prediction_timestamp must be before label_cutoff_5m
+SELECT COUNT(*) FROM news_training_samples
+WHERE prediction_timestamp >= label_cutoff_5m;
+
+-- 3. label bar must be at or after label_cutoff
+SELECT COUNT(*) FROM news_training_samples
+WHERE label_bar_timestamp_5m < label_cutoff_5m;
+
+-- 4. prediction_timestamp must not be null
+SELECT COUNT(*) FROM news_training_samples
+WHERE prediction_timestamp IS NULL;
+
+-- 5. no duplicate identity keys
+SELECT COUNT(*) FROM (
+  SELECT event_id, asset_id, prediction_timestamp, feature_version, COUNT(*) AS cnt
+  FROM news_training_samples
+  GROUP BY 1,2,3,4 HAVING COUNT(*) > 1
+) dupes;
+
+-- 6. reaction window ordering
+SELECT COUNT(*) FROM news_market_reactions
+WHERE reaction_window_end < reaction_window_start;
+```
+
+---
+
+## Phase 3B.2: Training Sample Idempotency
+
+*Added in migration `004_training_sample_uniqueness` (Phase 3B.2, 2026-09-18)*
+
+### Unique Constraint on `news_training_samples`
+
+```sql
+UNIQUE (event_id, asset_id, prediction_timestamp, feature_version)
+-- constraint name: uq_training_sample_identity
+```
+
+Calling `MLDatasetGenerator.generate()` twice for the same (event, asset) pair now produces exactly one row. The upsert updates non-identity fields while leaving identity fields (`event_id`, `asset_id`, `prediction_timestamp`, `feature_version`) immutable once written.
+
+### `return_1m` Semantic Policy (Option C)
+
+`return_1m` in `news_market_reactions` is **not** a genuine 1-minute return. It is the return from the T−5m baseline to the close of the first available **5m candle** whose open falls at or after T+1m (precision ±5 minutes). This is a deliberate policy (Option C — explicit redefinition) retained for downstream API compatibility.
+
+```typescript
+export function intervalForOffset(offsetName: ReactionOffsetName): string {
+  return offsetName === 'plus1d' ? '1d' : '5m';
+}
+```
+
+All nine intraday offsets map to `'5m'`. Only `plus1d` maps to `'1d'`.
+
+---
+
+## Feature Changelog
+
+| Version | Phase | Changes |
+|---|---|---|
+| 1.0.0 | Initial | 7 feature groups, 23 tables, pgvector HNSW |
+| — | Phase 3A | `content_depth`, `content_quality_score`, `source_confidence` weighting |
+| — | Phase 3B preflight | LookAheadGuard redesign: `information_as_of` replaces `computed_at` |
+| — | Phase 3B.1 | `feature_as_of` column; `prediction_timestamp`, `label_bar_timestamp_*` on training samples; `intervalForOffset()` RXN-G1 fix |
+| — | Phase 3B.2 | `uq_training_sample_identity` unique constraint; `MLDatasetGenerator` upsert; `return_1m` Option C policy documented |

@@ -4,6 +4,7 @@
 **Auditor:** Phase 3B-Preflight (automated inspection + live DB + runtime tests)  
 **Baseline:** Phase 3A Runtime Certification Report (2026-09-15)  
 **Stack state:** Running — API port 3001, 8 workers, Scrapling port 8001  
+**Post-audit annotation:** Phase 3B.1 (2026-09-17) and Phase 3B.2 (2026-09-18) resolution notes added inline — look for **[3B.1]** and **[3B.2]** markers.
 
 ---
 
@@ -15,19 +16,22 @@ two are partial.  The most critical findings are:
 
 1. **LookAheadGuard was using `computed_at` instead of `information_as_of`** — this
    would have caused every historical backfill feature to be rejected as false look-ahead.
-   **Fixed and 53 new tests pass.**
+   **Fixed and 53 new tests pass.** **[3B.1: ✅ Resolved — `FeatureSource.informationAsOf` interface, 79/79 tests pass]**
 
 2. **`DataServiceClient` field mapping bug** — `candle.datetime` (undefined) instead of
    `new Date(candle.time * 1000)`.  All `OHLCVBar.timestamp` values were `Invalid Date`.
-   **Fixed.**
+   **Fixed.** **[3B.1: ✅ Resolved — MKT-BUG-1 fix confirmed; `OHLCVResponse` envelope also added]**
 
 3. **Historical reactions = 0** — intraday OHLCV is unavailable from all providers.
    Daily OHLCV works only for 4 instruments in the Jan 2024 window.
+   **[3B.2: ✅ Resolved — RC-1 (Upstox key mismatch), RC-2 (Redis checkpoint), RC-3 (Docker env missing) all fixed. All 8 instruments × 4 intervals now operational. Remaining blocker: Jan 2024 news ingestion + data-service image rebuild.]**
 
 4. **One-hour run was 12–14 minutes** — the Phase 3A runtime test did not run for 60
    minutes.  A genuine 60-minute run has not been completed.
+   **[3B.2: ⏳ Pending — all code preconditions are met. Test can proceed after data-service image is rebuilt.]**
 
 5. **Training samples = 0** — no ML training data has been generated.
+   **[3B.2: ⏳ Still 0 — blocked on Jan 2024 news ingestion and reactions, not on code issues.]**
 
 **GO / NO-GO decisions are at the end of this document (§10).**
 
@@ -105,7 +109,7 @@ computed_at  <=  event_timestamp
 
 ## 3. Market Data Certification
 
-**Status: PARTIAL PASS — data range severely limited**
+**Status: PARTIAL PASS — data range severely limited** *(at preflight — see Phase 3B.2 resolution below)*
 
 ### 3.1 Architecture compliance
 
@@ -116,8 +120,9 @@ calls in SentinelPulse.  **PASS.**
 
 **Fixed:** `candle.datetime` (undefined) → `new Date(candle.time * 1000)` (correct epoch conversion).
 This fix is required for LookAheadGuard bar-timestamp validation.
+**[3B.1: ✅ Confirmed — MKT-BUG-1. `OHLCVResponse` envelope also added with `metadata.provider`, `metadata.dataAsOf`, `metadata.quality`.]**
 
-### 3.3 OHLCV availability
+### 3.3 OHLCV availability (at preflight)
 
 | Interval | Available instruments | Date range |
 |---|---|---|
@@ -126,16 +131,16 @@ This fix is required for LookAheadGuard bar-timestamp validation.
 | 15m | 0/8 | No data |
 | 5m | 0/8 | No data |
 
-**Critical finding:** Intraday OHLCV is not available from any provider for any instrument.
-This means HistoricalReactionEngine can only generate `return_1d` labels, not
-`return_5m`, `return_15m`, `return_30m`, or `return_1h`.
+**[3B.2: ✅ Fully resolved.** Three root causes fixed (RC-1/RC-2/RC-3). Current state: all 8 instruments × 5m/15m/1h/1d operational across Windows A–D (Sep 2026, Jun 2026, Jan 2024, Apr 2024). See `PHASE3B2_CERTIFICATION_REPORT.md §4` for the full coverage matrix.]
 
-### 3.4 Provider fallback observed
+### 3.4 Provider fallback observed (at preflight)
 
 - Angel One → `angel_one` (RELIANCE Jan 2024)
 - Angel One failed → Yahoo → `yahoo_finance` (HDFCBANK, INFY, BANKNIFTY)
 - All providers failed → empty response (TCS, ICICIBANK, SBIN, NIFTY)
 - Silent empty return: PASS (no exceptions thrown)
+
+**[3B.2: ✅ Full waterfall certified (5/5 tests A–E): angel_one / upstox / yahoo_finance / null all observed. Upstox now confirmed as active provider for IDX instruments.]**
 
 ### 3.5 Provider metadata gap
 
@@ -143,7 +148,9 @@ This means HistoricalReactionEngine can only generate `return_1d` labels, not
 or `data_available` fields.  SentinelPulse callers cannot observe which provider served
 the data.
 
-**Reference:** `docs/MARKET_DATA_CERTIFICATION.md`
+**[3B.1: ✅ Resolved — `OHLCVResponse` envelope added. `metadata.provider` now surfaced.]**
+
+**Reference:** `docs/MARKET_DATA_CERTIFICATION.md` (preflight), `docs/MARKET_DATA_FINAL_CERTIFICATION.md` (Phase 3B.1)
 
 ---
 
@@ -166,7 +173,7 @@ is configured and failing silently or not configured in this environment.
 
 ## 5. Historical Reaction Test
 
-**Status: FAIL — 0 reactions generated**
+**Status: FAIL — 0 reactions generated** *(at preflight — see Phase 3B.2 resolution below)*
 
 | Metric | Result |
 |---|---|
@@ -184,7 +191,11 @@ but cannot produce results without OHLCV data.
 For the pilot: only `return_1d` labels are achievable.  `return_5m`, `return_15m`,
 `return_30m`, `return_1h` will remain null until intraday OHLCV becomes available.
 
-**Reference:** `docs/HISTORICAL_REACTION_CERTIFICATION.md`
+**[3B.1: ✅ RXN-G1 fixed — `intervalForOffset()` now returns `'5m'` for all intraday offsets. Provider metadata now persisted. 27/27 reaction tests pass.]**
+
+**[3B.2: ✅ OHLCV data now fully available for all 8 instruments × all intervals. Intraday labels (return_5m/15m/1h) are now achievable. Reactions remain 0 only because Jan 2024 news ingestion has not yet run. Once `news_events` rows exist for 2024-01-08 → 2024-01-14, `pilot-reaction-test.ts` will generate reactions immediately.]**
+
+**Reference:** `docs/HISTORICAL_REACTION_CERTIFICATION.md` (preflight), `docs/HISTORICAL_REACTION_FINAL_CERTIFICATION.md` (Phase 3B.1)
 
 ---
 
@@ -379,38 +390,41 @@ more once the look-ahead bug is fixed and OHLCV data is available.
 
 ## 16. Open Issues Requiring Action Before Phase 3B
 
-| Priority | Gap | Action Required |
-|---|---|---|
-| **BLOCKER** | 60-minute runtime test not done | Run actual 60-minute test with 5-min snapshots |
-| **BLOCKER** | Historical reactions = 0 (intraday OHLCV missing) | Verify provider circuits with data-service team; or accept return_1d only |
-| **BLOCKER** | Training samples = 0 | Blocked by reactions; pilot must run first |
-| HIGH | `feature_as_of` not a dedicated column | Add `feature_as_of TIMESTAMPTZ` to `news_features` |
-| HIGH | `prediction_timestamp` not in training samples | Add `prediction_timestamp TIMESTAMPTZ` to `news_training_samples` |
-| HIGH | HistoricalReactionEngine interval bug (RXN-G1) | Pass `interval: '5m'` or `'1m'` for intraday offsets, not `'1d'` |
-| HIGH | Provider metadata not surfaced | Add provider + fallback_used to `DataServiceClient` response |
-| HIGH | Event classification false negative rate ~60% | Add 5 missing regex patterns |
-| MEDIUM | Asset linkage 8.3% overall | Add more India-specific source coverage |
-| MEDIUM | Actor extraction quality poor | Fix actor extraction artifacts ("From Oman", "In", "Scope") |
-| MEDIUM | Upstox not observed as active provider | Confirm Upstox circuit state with data-service |
+> **Note (Phase 3B.2 update — 2026-09-18):** Items marked ✅ RESOLVED below were addressed in Phase 3B.1 or 3B.2. Items still marked ⏳ PENDING are the remaining blockers for Phase 3B.3.
+
+| Priority | Gap | Action Required | Resolution |
+|---|---|---|---|
+| **BLOCKER** | 60-minute runtime test not done | Run actual 60-minute test with 5-min snapshots | ⏳ PENDING — all preconditions met; data-service image rebuild required first |
+| **BLOCKER** | Historical reactions = 0 (intraday OHLCV missing) | Verify provider circuits with data-service team | ✅ RESOLVED (Phase 3B.2) — RC-1/RC-2/RC-3 fixed; all 8 instruments × 4 intervals now operational |
+| **BLOCKER** | Training samples = 0 | Blocked by reactions; pilot must run first | ⏳ PENDING — blocked on Jan 2024 news ingestion + data-service image rebuild |
+| HIGH | `feature_as_of` not a dedicated column | Add `feature_as_of TIMESTAMPTZ` to `news_features` | ✅ RESOLVED (Phase 3B.1) — migration 003 added `feature_as_of` |
+| HIGH | `prediction_timestamp` not in training samples | Add `prediction_timestamp TIMESTAMPTZ` to `news_training_samples` | ✅ RESOLVED (Phase 3B.1) — migration 003 added `prediction_timestamp` + `label_bar_timestamp_*` |
+| HIGH | HistoricalReactionEngine interval bug (RXN-G1) | Pass `interval: '5m'` or `'1m'` for intraday offsets, not `'1d'` | ✅ RESOLVED (Phase 3B.1) — `intervalForOffset()` now maps all intraday offsets to `'5m'` |
+| HIGH | Provider metadata not surfaced | Add provider + fallback_used to `DataServiceClient` response | ✅ RESOLVED (Phase 3B.1) — `OHLCVResponse` envelope with `metadata.provider`, `metadata.dataAsOf`, `metadata.quality` |
+| HIGH | Event classification false negative rate ~60% | Add 5 missing regex patterns | ⏳ PENDING — not a blocker for 3B.3 |
+| MEDIUM | Asset linkage 8.3% overall | Add more India-specific source coverage | ⏳ PENDING — low priority |
+| MEDIUM | Actor extraction quality poor | Fix actor extraction artifacts | ⏳ PENDING — low priority |
+| MEDIUM | Upstox not observed as active provider | Confirm Upstox circuit state with data-service | ✅ RESOLVED (Phase 3B.2) — RC-1 + RC-3 fixed; Upstox now serves IDX instruments confirmed via Test B + Test D |
 
 ---
 
 ## 10. GO / NO-GO
 
-> Based strictly on measured evidence. No optimistic language.
+> Based strictly on measured evidence as of Phase 3B-Preflight (2026-09-16).  
+> **Phase 3B.2 resolution notes added in brackets where items have since been addressed.**
 
 ---
 
 ### FULL HISTORICAL BACKFILL (2024-01-01 to present)
 
-**NO-GO**
+**NO-GO** *(as of preflight — conditions improving)*
 
 Reasons:
-1. Genuine 60-minute runtime test has not been completed.
-2. Intraday OHLCV is not available — backfill would generate 0 intraday labels.
-3. Daily OHLCV available only through ~2024-01-18 — backfill beyond this date produces empty reactions.
-4. Training samples = 0 — the look-ahead bug fix and reaction engine must first be validated on the 7-day pilot.
-5. `feature_as_of` column missing — point-in-time audit trail is incomplete.
+1. Genuine 60-minute runtime test has not been completed. **[3B.2: preconditions now met; test pending]**
+2. Intraday OHLCV is not available — backfill would generate 0 intraday labels. **[3B.2: RESOLVED — all 8 instruments × 4 intervals now operational post RC-1/RC-2/RC-3 fixes]**
+3. Daily OHLCV available only through ~2024-01-18 — backfill beyond this date produces empty reactions. **[3B.2: Coverage confirmed for Windows A–D including Jan 2024 and Sep 2026]**
+4. Training samples = 0 — the look-ahead bug fix and reaction engine must first be validated on the 7-day pilot. **[3B.2: still 0 samples; Jan 2024 news ingestion pending]**
+5. `feature_as_of` column missing — point-in-time audit trail is incomplete. **[3B.1: RESOLVED — migration 003 added `feature_as_of`]**
 
 Do not proceed to full backfill until the 7-day pilot completes successfully with non-zero reactions.
 
@@ -418,12 +432,12 @@ Do not proceed to full backfill until the 7-day pilot completes successfully wit
 
 ### ML TRAINING
 
-**NO-GO**
+**NO-GO** *(unchanged)*
 
 Reasons:
-1. Training samples = 0.
-2. Historical reactions = 0 — no labels can be generated.
-3. Intraday labels (return_5m through return_1h) are not achievable with current OHLCV availability.
+1. Training samples = 0. **[3B.2: still 0; blocked on reactions]**
+2. Historical reactions = 0 — no labels can be generated. **[3B.2: OHLCV data now available; reactions blocked only on Jan 2024 news ingestion]**
+3. Intraday labels (return_5m through return_1h) are not achievable with current OHLCV availability. **[3B.2: RESOLVED — intraday OHLCV fully operational]**
 4. The 7-day pilot must first generate training samples and confirm reaction coverage > 10%.
 
 ml-service StockFeatures has 0 news fields. Adding news features requires training data first.
@@ -432,7 +446,7 @@ ml-service StockFeatures has 0 news fields. Adding news features requires traini
 
 ### ALPHAFORGE INTEGRATION
 
-**NO-GO**
+**NO-GO** *(unchanged)*
 
 Reasons:
 1. No ablation study has been run.
@@ -444,15 +458,17 @@ Reasons:
 
 ### 7-DAY HISTORICAL PILOT (2024-01-08 to 2024-01-14)
 
-**CONDITIONAL GO — after 60-minute runtime test passes**
+**CONDITIONAL GO** *(conditions tightening — closer than at preflight)*
 
-The pilot is possible with current state IF:
+The pilot is possible IF:
+- The data-service Docker image is rebuilt with Phase 3B.2 fixes committed (**new requirement — highest priority**)
 - The 60-minute runtime test is completed first (genuine 60 minutes, with 5-minute snapshots)
-- The pilot accepts that only `return_1d` labels will be available (intraday = 0)
-- The pilot targets only 4 instruments: RELIANCE, HDFCBANK, INFY, BANKNIFTY
+- Jan 2024 news ingestion is run to populate `news_events` for the pilot window
+- The pilot accepts all return horizons (5m/15m/1h/1d) — all OHLCV data is now available **[3B.2 update]**
+- The pilot targets all 8 instruments — full coverage confirmed **[3B.2 update — was 4 instruments only at preflight]**
 - The pilot measures reaction coverage rate before any decision to proceed further
 
-If reaction coverage rate (articles with return_1d non-null / articles with asset links) < 20%, stop.
+If reaction coverage rate (articles with any non-null return / articles with asset links) < 20%, stop.
 
 ---
 
@@ -480,4 +496,6 @@ If reaction coverage rate (articles with return_1d non-null / articles with asse
 
 ---
 
-*Generated by Phase 3B-Preflight Audit — 2026-09-16*
+*Generated by Phase 3B-Preflight Audit — 2026-09-16*  
+*Annotated with Phase 3B.1 resolutions — 2026-09-17*  
+*Annotated with Phase 3B.2 resolutions — 2026-09-18*
