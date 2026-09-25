@@ -539,6 +539,12 @@ model NewsTrainingSample {
   marketDataSnapshotVersion String    @map("market_data_snapshot_version")
   modelVersion              String    @map("model_version")
   createdAt                 DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  /// PIT validation flag (mandate S10, S14).
+  /// True when predictionTimestamp is set AND article published_at <= predictionTimestamp
+  /// AND no future-dated features were used. ml-service2.0 rejects samples where false.
+  lookAheadValidated        Boolean   @default(false) @map("look_ahead_validated")
+  /// UTC published_at of the article used as PIT anchor. Must be <= predictionTimestamp.
+  pitAnchorPublishedAt      DateTime? @map("pit_anchor_published_at") @db.Timestamptz
 
   // Relations
   event         NewsEvent   @relation(fields: [eventId], references: [id])

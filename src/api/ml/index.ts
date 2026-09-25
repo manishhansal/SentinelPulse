@@ -542,6 +542,10 @@ export async function registerMlRoutes(app: FastifyInstance): Promise<void> {
           marketDataSnapshotVersion: true,
           modelVersion: true,
           createdAt: true,
+          // PIT validation fields (mandate §10, §14) — always included
+          lookAheadValidated: true,
+          pitAnchorPublishedAt: true,
+          predictionTimestamp: true,
         },
       });
 
