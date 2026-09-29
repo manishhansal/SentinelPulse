@@ -134,6 +134,41 @@ migrate: ## Run Prisma migrate deploy against the configured DATABASE_URL
 seed: ## Seed news sources into the database
 	$(COMPOSE) exec api node dist/scripts/seed-sources.js
 
+.PHONY: backfill
+backfill: ## Start historical news backfill (2021-01-01 → today, batch=200, all sources)
+	@echo "▶  Starting SentinelPulse historical news backfill..."
+	@echo "   This enqueues the job. The backfill worker must be running to process it."
+	@echo "   Worker: make worker-backfill  (separate terminal)"
+	@set -a && source $(ENV_FILE) && set +a && \
+		npx tsx src/scripts/start-backfill.ts \
+			--start $${BACKFILL_START:-2021-01-01} \
+			--end $${BACKFILL_END:-$(shell date +%Y-%m-%d)} \
+			--batch $${BACKFILL_BATCH:-200}
+
+.PHONY: backfill-status
+backfill-status: ## Show status of backfill job (JOB_ID=<uuid> make backfill-status, or list all)
+	@set -a && source $(ENV_FILE) && set +a && \
+		JOB_ID=$(JOB_ID) npx tsx src/scripts/backfill-status.ts
+
+.PHONY: worker-backfill
+worker-backfill: ## Run the backfill worker locally (processes news.backfill queue)
+	@echo "▶  Starting backfill worker (WORKER_BACKFILL_CONCURRENCY=1)..."
+	@echo "   This process must stay running while backfill is active."
+	@set -a && source $(ENV_FILE) && set +a && \
+		WORKER_BACKFILL_CONCURRENCY=1 \
+		BACKFILL_BATCH_DELAY_MS=500 \
+		npx tsx src/workers/backfill.worker.ts
+
+.PHONY: backfill-full
+backfill-full: ## Start backfill AND launch worker in background (convenience target)
+	@echo "▶  Starting full backfill sequence (enqueue + worker)..."
+	@$(MAKE) worker-backfill &
+	@sleep 2
+	@$(MAKE) backfill
+	@echo ""
+	@echo "Worker is running in background. Monitor with: make backfill-status"
+	@echo "Stop worker: kill %% (or Ctrl+C in its terminal)"
+
 .PHONY: prisma-studio
 prisma-studio: ## Open Prisma Studio (runs on host, not in container)
 	@set -a && source $(ENV_FILE) && set +a && npx prisma studio

@@ -18,6 +18,7 @@
     "worker:impact":    "tsx src/workers/impact.worker.ts",
     "worker:feature":   "tsx src/workers/feature.worker.ts",
     "worker:embed":     "tsx src/workers/embed.worker.ts",
+    "worker:backfill":  "tsx src/workers/backfill.worker.ts",
 
     "cron:velocity": "tsx src/engines/velocity/velocity-cron.ts",
     "cron:breadth":  "tsx src/engines/breadth/breadth-cron.ts",
@@ -26,6 +27,8 @@
     "scheduler": "tsx src/scripts/run-scheduler.ts",
 
     "seed": "tsx src/scripts/seed-sources.ts",
+    "backfill":        "tsx src/scripts/start-backfill.ts",
+    "backfill:status": "tsx src/scripts/backfill-status.ts",
 
     "docker:build": "docker compose -f docker/docker-compose.yml --env-file .env.local build",
     "docker:up":    "docker compose -f docker/docker-compose.yml --env-file .env.local up -d",
