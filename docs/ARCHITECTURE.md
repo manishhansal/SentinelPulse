@@ -157,7 +157,7 @@ Tier-2 sources (Bloomberg, FT, CoinDesk)               ─┤──► news.raw
 
 **Special queues**:
 - `news.embeddings` — fed by EmbeddingEngine; consumed by `news-embed-worker` (WORKER_EMBED_CONCURRENCY)
-- `news.backfill` — fed by BackfillEngine; max 20% of total live-pipeline worker concurrency
+- `news.backfill` — fed by BackfillEngine + `src/scripts/start-backfill.ts`; consumed by **`news-backfill-worker`** (`src/workers/backfill.worker.ts`, `WORKER_BACKFILL_CONCURRENCY=1`); capped at ≤20% of live pipeline capacity; checkpoint state stored in `news_features` table using `featureType='BACKFILL_CHECKPOINT'`; supports job types `"backfill"` (next batch) and `"backfill-resume"` (restore from checkpoint)
 
 ---
 
@@ -403,3 +403,53 @@ null / empty                      → no synthetic data (guaranteed)
 ```
 
 `force_provider` parameter on `BackfillRequest` enables explicit provider selection for testing and backfill operations.
+
+---
+
+## Phase 3B.3 Architecture Changes (Partial — 2026-09-25)
+
+### New: Backfill Worker (`src/workers/backfill.worker.ts`)
+
+A new BullMQ worker was added for the `news.backfill` queue. It handles two job types:
+- `"backfill"` — processes the next batch of articles from cursor position
+- `"backfill-resume"` — restores from checkpoint stored in `news_features` (`featureType='BACKFILL_CHECKPOINT'`)
+
+Concurrency: `WORKER_BACKFILL_CONCURRENCY=1` (default, hard cap at 1 to avoid live pipeline starvation). Configurable via env. Batch delay: `BACKFILL_BATCH_DELAY_MS=500` (default).
+
+**Operational path:** `npm run backfill` (CLI trigger via `src/scripts/start-backfill.ts`) → `BackfillEngine.startJob()` → enqueues to `news.backfill` → consumed by backfill worker.
+
+> **Important:** `POST /api/v1/admin/backfill` is a **stub** returning `{ "data": { "jobId": null } }`. Use the CLI path for real backfills.
+
+### New: Schema Fields on `news_training_samples` (2026-09-25)
+
+Two new fields added (equivalent to migration 005):
+
+| Column | Type | Default | Purpose |
+|---|---|---|---|
+| `look_ahead_validated` | Boolean | false | True when `article.published_at <= prediction_timestamp` and no future features used; ml-service2.0 rejects samples where false |
+| `pit_anchor_published_at` | DateTime? | null | UTC published_at of article used as PIT anchor; must be ≤ prediction_timestamp |
+
+Exposed via `GET /api/v1/ml/training/samples` response envelope.
+
+### CLI Scripts Added
+
+| Script | Command | Purpose |
+|---|---|---|
+| `src/scripts/start-backfill.ts` | `npm run backfill` | Triggers BackfillEngine.startJob(); `--start`, `--end`, `--batch`, `--sources` flags |
+| `src/scripts/backfill-status.ts` | `npm run backfill:status` | Reads checkpoint from `news_features`, shows progress % |
+
+### Makefile Targets Added
+
+```bash
+make backfill              # trigger full backfill (2021-01-01 → today)
+make backfill-status       # check checkpoint progress
+make worker-backfill       # start the backfill worker process
+```
+
+### Phase 3B.3 Blockers (Outstanding)
+
+1. data-service Docker image rebuild required (Phase 3B.2 fixes applied via `docker cp`, not committed to image)
+2. Jan 2024 news ingestion pending (0 `news_events` rows for 2024-01-08→2024-01-14)
+3. 60-minute runtime test preconditions met but test not yet run (RUNTIME_60MIN_CERTIFICATION.md is a template)
+4. Historical reactions = 0 (blocked on Jan 2024 news ingestion, not code)
+5. Training samples = 0 (blocked on reactions)

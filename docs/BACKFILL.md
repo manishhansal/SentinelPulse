@@ -12,47 +12,50 @@ Backfill jobs run on the `news.backfill` BullMQ queue and are subject to a concu
 
 ---
 
-## Job Configuration
+## Triggering a Backfill
 
-Backfill jobs are created via:
+> **⚠️ Important:** The `POST /api/v1/admin/backfill` HTTP endpoint is a **placeholder stub** — it returns `{ "data": { "jobId": null } }` and does not trigger a real backfill job. Use the CLI path below.
 
+### Production Path (CLI)
+
+```bash
+# Full backfill — 2021-01-01 to today (default)
+npm run backfill
+# or via Makefile
+make backfill
+
+# Custom date range
+npm run backfill -- --start 2024-01-01 --end 2024-01-31
+
+# Custom date range + specific sources + batch size
+npm run backfill -- --start 2024-01-08 --end 2024-01-14 --sources reuters,moneycontrol --batch 50
+
+# Check progress
+npm run backfill:status
+# or
+make backfill-status
 ```
-POST /api/v1/admin/backfill
-Authorization: Bearer {api_key}
+
+**The CLI path:** `start-backfill.ts` → `BackfillEngine.startJob()` → enqueues to `news.backfill` → consumed by `src/workers/backfill.worker.ts`.
+
+### Worker must be running
+
+```bash
+npm run worker:backfill
+# or via Makefile
+make worker-backfill
 ```
 
-**Request Body**
+---
 
-```json
-{
-  "startDate": "2024-01-01T00:00:00.000Z",
-  "endDate":   "2024-01-07T23:59:59.999Z",
-  "sources":    ["reuters", "moneycontrol"],
-  "categories": ["NIFTY50", "BANKNIFTY"],
-  "assets":     ["RELIANCE.NS", "INFY.NS"],
-  "batchSize":  100
-}
-```
+## Job Configuration (CLI flags for `npm run backfill`)
 
-| Parameter | Type | Required | Constraints | Description |
-|-----------|------|----------|-------------|-------------|
-| `startDate` | ISO 8601 UTC | Yes | Must be before `endDate` | Start of historical window |
-| `endDate` | ISO 8601 UTC | Yes | Must be after `startDate` | End of historical window |
-| `sources` | string[] | Yes | 1–50 entries | Source IDs to include |
-| `categories` | string[] | No | Taxonomy category names | Filter articles by primary category |
-| `assets` | string[] | No | Asset IDs from InstrumentMaster | Filter articles by linked asset |
-| `batchSize` | integer | No | 1–1000; default 100 | Articles per checkpoint batch |
-
-If `startDate >= endDate`, the API returns `HTTP 400` with an error indicating an invalid date range.
-
-**Response**
-
-```json
-{
-  "job_id": "backfill-550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued"
-}
-```
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--start` | `2021-01-01T00:00:00.000Z` | Start of historical window |
+| `--end` | Today | End of historical window |
+| `--batch` | `100` | Articles per checkpoint batch (1–1000) |
+| `--sources` | all enabled | Comma-separated source IDs |
 
 ---
 

@@ -266,12 +266,13 @@ docker system df       # check current usage
 │                                                                            │
 │  worker-normalize  ┐                                                       │
 │  worker-dedup      │                                                       │
-│  worker-entity     │  BullMQ pipeline workers (8 stages)                  │
+│  worker-entity     │  BullMQ pipeline workers (8 live stages)              │
 │  worker-event      │  ← each reads from Redis queue                       │
 │  worker-sentiment  │                                                       │
 │  worker-impact     │                                                       │
 │  worker-feature    │                                                       │
 │  worker-embed      ┘                                                       │
+│  worker-backfill      BullMQ backfill worker (news.backfill queue)        │
 │                                                                            │
 │  cron-velocity     ┐  Periodic background jobs                            │
 │  cron-breadth      │  (run on schedule, not queue-driven)                 │
