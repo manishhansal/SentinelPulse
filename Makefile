@@ -2,8 +2,9 @@
 # SentinelPulse — Makefile
 #
 # Convenience targets that wrap deploy.sh and docker compose.
-# All docker targets use .env.local by default; override with:
-#   make deploy ENV_FILE=.env.production
+# All docker targets use .env.docker by default (Docker-internal service URLs).
+# Override with:  make deploy ENV_FILE=.env.local
+#               or make deploy ENV_FILE=.env.production
 #
 # Usage:
 #   make deploy          — full rebuild + redeploy (what CI runs)
@@ -26,7 +27,7 @@ SHELL := /usr/bin/env bash
 
 # ── Configurable variables ────────────────────────────────────────────────────
 
-ENV_FILE      ?= .env.local
+ENV_FILE      ?= .env.docker
 COMPOSE_FILE  ?= docker/docker-compose.yml
 COMPOSE       := docker compose -f $(COMPOSE_FILE) --env-file $(ENV_FILE)
 DEPLOY_SCRIPT := ./deploy.sh

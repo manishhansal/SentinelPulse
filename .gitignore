@@ -66,3 +66,6 @@ temp/
 __pycache__/
 *.pyc
 *.pyo
+
+# Docker environment file — container service URLs + dev secrets (never commit)
+.env.docker

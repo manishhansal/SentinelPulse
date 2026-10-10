@@ -55,6 +55,7 @@ Each worker's concurrency is independently configurable. If a variable is absent
 | `WORKER_IMPACT_CONCURRENCY` | `2` | news-impact-worker |
 | `WORKER_FEATURE_CONCURRENCY` | `4` | news-feature-worker |
 | `WORKER_EMBED_CONCURRENCY` | `2` | news-embed-worker |
+| `WORKER_BACKFILL_CONCURRENCY` | `1` | news-backfill-worker — hard cap at 1 to avoid starving live pipeline |
 
 ### Circuit Breaker
 
@@ -75,6 +76,7 @@ Each worker's concurrency is independently configurable. If a variable is absent
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BACKFILL_BATCH_DELAY_MS` | `500` | Delay between batches in ms (prevents live pipeline starvation) |
 | `BACKFILL_MAX_CONCURRENCY` | `2` | Max concurrent backfill workers (1–20) |
 | `BACKFILL_MAX_LIVE_QUEUE_SHARE` | `0.20` | Max fraction of total worker concurrency for backfill |
 

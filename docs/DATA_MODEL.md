@@ -395,13 +395,25 @@ Labelled ML training records joining FeatureVectors with forward returns.
 | `future_return_5m` … `future_return_1d` | FLOAT? | Forward returns; null if data unavailable |
 | `label_5m` … `label_1d` | TEXT? | STRONG_BULLISH / BULLISH / NEUTRAL / BEARISH / STRONG_BEARISH |
 | `label_cutoff_5m` … `label_cutoff_1d` | TIMESTAMPTZ? | Exact data timestamp used for each label |
+| `prediction_timestamp` | TIMESTAMPTZ? | Moment at which AlphaForge would generate a signal using these features |
+| `feature_as_of` | TIMESTAMPTZ? | Latest information timestamp across all data sources for this vector (PIT audit) |
+| `label_bar_timestamp_5m` … `label_bar_timestamp_1d` | TIMESTAMPTZ? | Open time of the bar used for each forward-return label |
+| `look_ahead_validated` | BOOLEAN | Default false. True when `article.published_at <= prediction_timestamp` and no future features used; ml-service2.0 rejects samples where false |
+| `pit_anchor_published_at` | TIMESTAMPTZ? | UTC published_at of the article used as PIT anchor; must be ≤ prediction_timestamp |
 | `feature_version` | TEXT | Semver |
 | `pipeline_version` | TEXT | Semver |
 | `market_data_snapshot_version` | TEXT | data-service snapshot tag |
 | `model_version` | TEXT | |
 | `created_at` | TIMESTAMPTZ | |
 
+**Unique Constraint (migration 004):** `uq_training_sample_identity` on `(event_id, asset_id, prediction_timestamp, feature_version)` — ensures idempotent upsert.
+
 **Indexes**: `INDEX(event_id, asset_id, feature_version)`, `INDEX(asset_id, created_at DESC)`
+
+**PIT invariant** (enforced in MLDatasetGenerator):
+```
+feature_as_of  <=  prediction_timestamp  <  label_cutoff_Xm  <=  label_bar_timestamp_Xm
+```
 
 ---
 

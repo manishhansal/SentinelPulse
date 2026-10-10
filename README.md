@@ -6,7 +6,7 @@ SentinelPulse is a production-grade service that transforms raw financial news i
 
 Every output is point-in-time correct (enforced by `LookAheadGuard`), source-isolated (enforced by `CircuitBreaker` per adapter), and fully traceable from `TrainingSample` back to the original raw article.
 
-> **Current status — Phase 3B.2 (2026-09-18):** All 578 unit tests passing. Three data-service root causes fixed (Upstox key mismatch, Redis checkpoint blocking backfill, missing Docker env vars). Historical intraday OHLCV fully operational for all 8 instruments × 4 intervals. Training dataset idempotency enforced via DB-level unique constraint (migration 004). Market data provider waterfall certified (5/5 tests). 13/13 Phase 3B.2 Go/No-Go decisions evaluated.  
+> **Current status — Phase 3B.2/3B.3 (2026-09-25):** All 578 unit tests passing. Three data-service root causes fixed (Upstox key mismatch, Redis checkpoint blocking backfill, missing Docker env vars). Historical intraday OHLCV fully operational for all 8 instruments × 4 intervals. Training dataset idempotency enforced via DB-level unique constraint (migration 004). Market data provider waterfall certified (5/5 tests). 13/13 Phase 3B.2 Go/No-Go decisions evaluated. **New since 3B.2:** `lookAheadValidated` + `pitAnchorPublishedAt` fields on `news_training_samples`; backfill worker (`src/workers/backfill.worker.ts`); CLI scripts `npm run backfill` / `npm run backfill:status`; Makefile `backfill`/`backfill-status` targets.  
 > See `PHASE3B2_CERTIFICATION_REPORT.md` for the complete audit.  
 > Previous phase reports: `docs/PHASE3A_RUNTIME_CERTIFICATION_REPORT.md` (Phase 3A), `PHASE3B_PREFLIGHT_REPORT.md` (Phase 3B preflight).
 
@@ -47,7 +47,7 @@ AlphaForge API  /  ml-service  /  Admin API
 | Phase 3B Preflight | 2026-09-16 | ✅ Complete | LookAheadGuard redesign (BUG-LAG-1 fixed); DataServiceClient timestamp fix; 2 critical bugs resolved |
 | Phase 3B.1 | 2026-09-17 | ✅ Certified | RXN-G1 interval fix; OHLCVResponse envelope; prediction_timestamp + feature_as_of + label_bar_timestamps persisted; provider metadata; 578 tests |
 | Phase 3B.2 | 2026-09-18 | ✅ Certified | 3 data-service root causes fixed (RC-1/RC-2/RC-3); full intraday OHLCV for 8 instruments × 4 intervals; training idempotency (migration 004 + upsert); pilot probe 37/40 daily sessions |
-| Phase 3B.3 | TBD | 🔜 Pending | Rebuild data-service Docker image; Jan 2024 news ingestion; historical reactions; 7-day pilot |
+| Phase 3B.3 (partial) | 2026-09-25 | 🔶 In Progress | `lookAheadValidated` + `pitAnchorPublishedAt` fields added to `news_training_samples` (schema); backfill worker (`src/workers/backfill.worker.ts`) + CLI scripts (`start-backfill.ts`, `backfill-status.ts`) + Makefile targets delivered. Blockers: Docker image rebuild, Jan 2024 news ingestion, 60-min runtime test. |
 
 ---
 
@@ -242,6 +242,7 @@ npm run worker:sentiment
 npm run worker:impact
 npm run worker:feature
 npm run worker:embed
+npm run worker:backfill  # historical news backfill worker (new — Phase 3B.3)
 ```
 
 ### 8. Start the scheduler
@@ -261,6 +262,23 @@ npm run cron:velocity  # recalculates news velocity every 60s
 npm run cron:breadth   # recalculates market breadth every 5 min
 npm run cron:regime    # updates market regime classification every 15 min
 ```
+
+### 10. Run a historical backfill (Phase 3B.3+)
+
+```bash
+# Trigger backfill job (2021-01-01 to today by default)
+set -a && source .env.local && set +a
+npm run backfill
+
+# Trigger with custom date range
+npm run backfill -- --start 2024-01-01 --end 2024-01-31
+
+# Check backfill checkpoint progress
+npm run backfill:status
+```
+
+> **Note:** The `POST /api/v1/admin/backfill` endpoint is a placeholder stub — it returns `{ jobId: null }` and does not trigger a real job. Use `npm run backfill` / `make backfill` for production backfill.
+
 
 ---
 

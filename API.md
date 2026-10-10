@@ -940,6 +940,13 @@ Returns a filtered, paginated list of `TrainingSample` records. Each sample is a
           "direction_1h": 1,
           "direction_1d": 1
         },
+        "prediction_timestamp": "2024-01-15T09:00:00.000Z",
+        "feature_as_of": "2024-01-15T08:59:00.000Z",
+        "label_bar_timestamp_5m": "2024-01-15T09:05:00.000Z",
+        "label_bar_timestamp_1h": "2024-01-15T10:00:00.000Z",
+        "label_bar_timestamp_1d": "2024-01-16T00:00:00.000Z",
+        "look_ahead_validated": true,
+        "pit_anchor_published_at": "2024-01-15T07:45:00.000Z",
         "importance_score": 0.74,
         "created_at": "2024-01-15T09:00:00.000Z"
       }
